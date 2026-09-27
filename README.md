@@ -39,8 +39,8 @@ sudo tar -xzf iptable-ui_linux_amd64.tar.gz -C /usr/local/bin/
 #### Start the Application
 
 ```bash
-chmod +x ./iptable-ui
-sudo ./iptable-ui
+chmod +x ./iptable-ui-linux-amd64 
+sudo ./iptable-ui-linux-amd64
 ```
 
 This will:
@@ -51,13 +51,13 @@ This will:
 #### List Existing Rules
 
 ```bash
-sudo iptable-ui list
+sudo iptable-ui-linux-amd64 list
 ```
 
 #### Reconcile Rules
 
 ```bash
-sudo iptable-ui reconcile
+sudo iptable-ui-linux-amd64 reconcile
 ```
 
 This syncs your saved rules with the actual iptables configuration.
@@ -94,7 +94,7 @@ The application uses SQLite for storage:
 You can specify a custom database path:
 
 ```bash
-sudo iptable-ui -db /path/to/custom/rules.db
+sudo iptable-ui-linux-amd64 -db /path/to/custom/rules.db
 ```
 
 ### WireGuard Setup
@@ -103,10 +103,10 @@ The application can help you set up WireGuard:
 
 ```bash
 # Install WireGuard tools
-sudo iptable-ui wireguard install
+sudo iptable-ui-linux-amd64 wireguard install
 
 # Check WireGuard status
-sudo iptable-ui wireguard status
+sudo iptable-ui-linux-amd64 wireguard status
 ```
 
 ## 📝 Creating Port Forwarding Rules
@@ -132,7 +132,7 @@ Use the TUI interface to add and manage rules.
 ### Security Warnings
 
 1. **Web Interface Security**: The web interface is served over plain HTTP by default. For production use:
-   - Bind to localhost only: `sudo iptable-ui -web-address 127.0.0.1:8787`
+   - Bind to localhost only: `sudo iiptable-ui-linux-amd64 -web-address 127.0.0.1:8787`
    - Use a reverse proxy with TLS
    - Restrict access with firewall rules
 
@@ -176,7 +176,7 @@ sudo apt-get install iptables
 
 Install WireGuard tools:
 ```bash
-sudo iptable-ui wireguard install
+sudo iptable-ui-linux-amd64 wireguard install
 ```
 
 ## 📚 Additional Information
