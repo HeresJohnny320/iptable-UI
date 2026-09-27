@@ -1,0 +1,6 @@
+/iptable-ui
+/dist/
+/data/
+*.db
+*.db-shm
+*.db-wal
