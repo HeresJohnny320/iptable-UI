@@ -22,7 +22,7 @@ IP Table UI simplifies managing iptables port forwarding rules. It provides:
 
 ### Installation
 
-#### Option 1: Pre-built Binary (Recommended)
+#### Pre-built Binary (Recommended)
 
 Download the latest release from [GitHub Releases](https://github.com/HeresJohnny320/iptable-ui/releases):
 
@@ -31,19 +31,6 @@ wget https://github.com/HeresJohnny320/iptable-ui/releases/download/v0.1.0/iptab
 sudo tar -xzf iptable-ui_linux_amd64.tar.gz -C /usr/local/bin/
 ```
 
-#### Option 2: Build from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/HeresJohnnyJohnny320/iptable-ui.git
-cd iptable-ui
-
-# Build the application
-make build
-
-# Install
-sudo make install
-```
 
 ## 🛠️ Usage
 
