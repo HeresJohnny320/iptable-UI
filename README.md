@@ -1,338 +1,269 @@
-# IP Table UI - Port Forward Manager
+# iptable-ui
 
-A user-friendly web and terminal interface for managing iptables port forwarding rules with WireGuard integration.
+iptable-ui forwards ports from a cheap VPS to a machine at home, through a VPN tunnel. People
+connect to your VPS, and the traffic ends up at your home server. Your home IP stays hidden and you
+never have to open ports on your home router.
 
-## 📋 Overview
+```
+  players / visitors  ──>  your VPS (iptable-ui)  ══ VPN tunnel ══>  your server at home
+       internet               public IP                              Minecraft, a website, ...
+```
 
-IP Table UI simplifies managing iptables port forwarding rules. It provides:
+You can do all of this with a few `iptables` commands, and plenty of people keep a shell script
+around for it. That works until you need to change something, forget which rule does what, reboot
+and lose everything, or try to remove a rule by line number. iptable-ui keeps your forwards in a
+small database and gives you two ways to manage them: a terminal UI for SSH, and a web page for the
+browser.
 
-- **Web Interface**: Easy-to-use web UI for managing rules
-- **Terminal Interface**: TUI (Terminal User Interface) for command-line users
-- **WireGuard Integration**: Manage WireGuard interfaces and peers
-- **Database Storage**: Persistent storage of your port forwarding rules
-- **Automatic Reconciliation**: Syncs your saved rules with actual iptables rules
-- **Packet Forwarding Toggle**: Turn IPv4 forwarding on or off, saved across reboots
-- **Apply Rules on Boot**: Optional systemd unit that re-applies your saved rules at startup
-- **VPN Auto-Detection**: Finds WireGuard, Tailscale, OpenVPN, ZeroTier, Nebula and NetBird interfaces
+## What you get
 
-## 🚀 Quick Start
+- Add, edit, switch off and remove forwards without touching `iptables` yourself.
+- A terminal UI that works over plain SSH (PuTTY included) and a web UI you can open from your
+  phone.
+- Works with WireGuard, Tailscale, NetBird, ZeroTier, Nebula and OpenVPN. It finds the VPN on its
+  own.
+- A setup wizard that installs a VPN for you if the server doesn't have one yet, on Ubuntu, Debian,
+  Fedora, RHEL, Arch, openSUSE and Alpine.
+- Your forwards come back after a reboot, if you want them to.
+- Automatic backups of your rules, with restore, download and upload.
+- Live speeds per adapter and per forward, and the raw firewall view when you want to double
+  check.
+- If you already have forwards made by another script, it imports them instead of fighting them.
 
-### Prerequisites
+## What you need
 
-- Linux system (tested on Ubuntu/Debian)
-- Root/sudo access (required for firewall operations)
-- Go 1.21+ (for building from source)
+- A Linux VPS with a public IP (amd64 or arm64).
+- Root access, or a user that can use `sudo`.
+- A VPN between the VPS and your home server, or let the setup wizard install one.
 
-### Installation
+## Install
 
-#### One-line Install (Recommended)
+The quickest way:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HeresJohnny320/iptable-UI/main/install.sh | sh
 ```
 
-This picks the right build for your CPU (amd64 or arm64), installs it as
-`/usr/local/bin/iptable-ui` already executable, and asks for `sudo` only for that final copy.
-No `chmod` needed.
+It downloads the newest release for your CPU and puts it at `/usr/local/bin/iptable-ui`. It only
+asks for `sudo` for that last copy step.
 
-#### Manual Download
-
-From [GitHub Releases](https://github.com/HeresJohnny320/iptable-UI/releases), the `.tar.gz`
-downloads keep the executable bit:
+Prefer to do it by hand? Grab the `.tar.gz` for your CPU from the
+[releases page](https://github.com/HeresJohnny320/iptable-UI/releases):
 
 ```bash
 tar -xzf iptable-ui-linux-amd64.tar.gz
-./iptable-ui-linux-amd64 install     # copies it to /usr/local/bin/iptable-ui
+./iptable-ui-linux-amd64 install
 ```
 
-A raw `iptable-ui-linux-amd64` download loses the executable bit, as every browser, `wget` and
-`curl` download does, and Linux will not start a file without it. Run
+If you downloaded the plain binary instead of the `.tar.gz`, Linux won't run it until it's marked
+executable. That's how downloads work, not something iptable-ui can fix from the inside. Run
 `chmod +x iptable-ui-linux-amd64` once, then `./iptable-ui-linux-amd64 install`.
 
-
-### Setup Wizard
-
-New server with no VPN yet? iptable-ui offers a setup wizard on first start when it finds no
-WireGuard, Tailscale, NetBird or other tunnel. Run it any time with:
-
-```bash
-iptable-ui setup
-```
-
-It asks before every change, and:
-
-1. Detects your distribution and package manager: Ubuntu/Debian (`apt`), Fedora/RHEL (`dnf`,
-   `yum`), Arch (`pacman`), openSUSE (`zypper`) and Alpine (`apk`).
-2. Lets you pick **WireGuard**, **Tailscale**, **NetBird**, or skip.
-3. Installs what is missing: the VPN, `iptables`, `conntrack` (recommended) and `whiptail`
-   (optional), using each distro's package names.
-4. Sets up the VPN:
-   - **WireGuard**: generates keys for both ends, writes `/etc/wireguard/wg0.conf`, saves a
-     ready-to-use home config (`~/wg0-home-peer.conf`, readable only by root), opens the port in
-     ufw or firewalld when active, and starts the tunnel on boot.
-   - **Tailscale / NetBird**: runs the official installer, then signs in with a browser link or an
-     auth/setup key you paste.
-5. Turns on IPv4 forwarding and apply-on-boot, then opens the TUI.
-
-Pass `--no-wizard` to stop the first-start question.
-
-## 🛠️ Usage
-
-### Basic Commands
-
-#### Start the Application
+## First run
 
 ```bash
 iptable-ui
 ```
 
-No need to type `sudo`: when iptable-ui needs root, it re-runs itself with `sudo` (or `doas`) and
-asks for your password. Read-only commands such as `iptable-ui list` run as your user.
+You don't need to type `sudo`. iptable-ui changes the firewall, so when it needs root it re-runs
+itself with `sudo` (or `doas`) and asks for your password.
 
-This will:
-1. Start the web interface on `http://0.0.0.0:8787`
-2. Launch the TUI interface
-3. Display a temporary web token for authentication
+On startup it:
 
-#### List Existing Rules
+- works out which adapter faces the internet and which one is your VPN, and prints both,
+- backs up its database,
+- picks up any port forwards that already exist on the server,
+- starts the web UI on port 8787 and prints a sign-in link,
+- opens the terminal UI.
 
-```bash
-iptable-ui list
-```
-
-#### Re-apply Rules
+If it can't find any VPN, it offers to run the setup wizard. You can also start the wizard
+yourself at any time:
 
 ```bash
-iptable-ui reconcile
+iptable-ui setup
 ```
 
-Rebuilds the firewall from your saved rules, the same as `R` in the TUI. This is also what
-"apply rules on boot" runs at startup.
+The wizard asks before it installs or changes anything. It detects your distro, lets you choose
+WireGuard, Tailscale or NetBird, installs what's missing, and gets the tunnel up:
 
-### Web Interface
+- WireGuard: it makes the keys for both ends, writes the VPS config, and saves a finished config
+  for your home machine (usually `/root/wg0-home-peer.conf`; the wizard prints the exact path and
+  the `scp` command to fetch it). Copy that file home as `/etc/wireguard/wg0.conf`, run
+  `sudo wg-quick up wg0` there, and you're connected. Delete the file from the VPS afterwards, since
+  it contains your home machine's private key.
+- Tailscale and NetBird: it runs their official installer and signs you in, either with a browser
+  link or with a key you paste.
 
-The web address and sign-in token are masked on screen (`http://203.•••.•••.•••:8787`,
-`3f9a••••••••`), so screenshots and screen sharing do not give them away. They stay usable:
+It also turns on IP forwarding and "apply on boot" for you. Don't want the wizard question at
+startup? Pass `--no-wizard`.
 
-- **Click** the masked address (Ctrl+click in most terminals) to open the web UI already signed
-  in, in terminals that support links (Windows Terminal, iTerm2, GNOME Terminal, kitty, WezTerm).
-- Press **`C`** in the TUI to copy the full sign-in link to your computer's clipboard (OSC 52; also
-  works over SSH and inside tmux).
-- Press **`V`** to show the real address and token, for terminals without links or clipboard
-  support such as PuTTY, then **`V`** again to hide them. In whiptail mode, choose **Show web UI
-  sign-in link**.
+## Your first forward
 
-After starting the application:
-1. Open your browser to `http://localhost:8787`
-2. Enter the temporary web token displayed in the terminal
-3. Use the web interface to:
-   - Add new port forwarding rules
-   - Edit existing rules
-   - Enable/disable rules
-   - Delete rules
+Say you run a Minecraft server at home, and your home machine is `10.66.0.2` on the VPN.
 
-### Terminal Interface (TUI)
+1. Press `A` in the terminal UI, or use the form on the right of the web UI.
+2. Label: `Minecraft`. Public port: `25565`. Destination: `10.66.0.2`. Leave the destination port
+   empty to reuse 25565. Protocol: TCP+UDP.
+3. Save. It's live right away.
 
-The TUI provides:
-- Real-time rule list
-- Quick enable/disable toggle
-- Edit rules
-- Delete rules
-- WireGuard interface management
-- Gateway status: IPv4 forwarding, VPN link and apply-on-boot
-- A help screen (`?`) explaining every key
+Players now connect to `your-vps-ip:25565`. Use your home server's VPN address as the destination,
+not its home network address like `192.168.1.x`. With Tailscale or NetBird that's the `100.x.x.x`
+address, which `tailscale ip -4` or `netbird status` will show you on the home machine.
 
-The help bar lists the everyday keys. Press `Enter` on a rule for its actions (edit, on/off, real
-client IP, remove), and `M` for a menu with everything else. Every letter below also works
-directly from the rule list.
+## The terminal UI
 
-| Key | Action |
+The bar at the bottom only shows the keys you'll use most. Everything else is one step away:
+
+- `Enter` on a rule opens its actions: edit, on/off, real client IP, remove.
+- `M` opens a menu with the rest.
+- `?` explains every key.
+
+| Key | What it does |
 | --- | --- |
-| `Enter` | Actions for the selected rule |
-| `M` | More actions menu |
-| `/` | Search: filter rules as you type (`Enter` keeps the filter, `Esc` clears it) |
+| `↑` `↓` | Pick a rule |
+| `Enter` | Actions for the picked rule |
+| `/` | Search (try `25565`, `minecraft`, `off`, `udp off`) |
 | `A` / `E` | Add / edit a rule |
-| `T` | Enable or disable the selected rule |
-| `I` | Toggle passing the real client IP for the selected rule (off by default; asks before turning on) |
-| `D` | Remove the selected rule (asks first) |
-| `R` | Re-apply rules: rebuild the firewall from your saved rules (only needed if another tool wiped them) |
-| `F` | Toggle IPv4 packet forwarding (asks before turning it off) |
-| `B` | Apply rules on boot: re-apply your saved rules automatically after a reboot |
-| `S` | Backups: back up now (`N`), download (`D`), restore (`Enter`), import a file (`I`), change folder (`O`) |
-| `L` | Live firewall rules (`iptables -t nat -L IPTUI_DNAT -n -v --line-numbers`) |
-| `P` | Change the web UI port (saved for next time) |
-| `C` | Copy the web UI sign-in link to your clipboard |
-| `V` | Show or hide the web UI address and token (masked by default) |
-| `O` | Switch the TUI look (saved for next time) |
-| `N` | Switch between the detailed and the simple view (saved for next time) |
-| `X` | Remove all rules (type `REMOVE ALL` to confirm; a backup is taken first) |
-| `G` | WireGuard setup |
+| `T` | Switch the rule on or off |
+| `D` | Remove the rule (asks first) |
 | `W` | Start or stop the web UI |
-| `U` | Switch to the whiptail look (classic blue menus; needs the whiptail package) |
-| `?` | Help: explains every key |
-| `Q` | Quit |
+| `M` | More actions |
+| `?` | Help |
+| `Q` | Quit (your forwards keep working) |
 
-### Whiptail Mode
+These work too, and they're all in the `M` menu:
 
-Prefer classic blue menus like `raspi-config`? Start with `--whiptail`, or press `U` in the TUI.
-Whiptail mode can list, add, edit, toggle and remove rules, and toggle forwarding, apply-on-boot and
-the web UI. Choose "Switch to the full TUI" to go back; the full TUI also has the options whiptail
-mode does not (backups, live firewall rules, web port, remove all, search and WireGuard setup).
+| Key | What it does |
+| --- | --- |
+| `I` | Show visitors' real IPs to your server for this rule (see further down) |
+| `R` | Re-apply your rules to the firewall |
+| `F` | IP forwarding on/off |
+| `B` | Apply rules on boot on/off |
+| `S` | Backups |
+| `L` | Live firewall rules |
+| `P` | Change the web UI port |
+| `C` | Copy the web UI sign-in link |
+| `V` | Show the web address and sign-in token (hidden on screen by default) |
+| `N` | Simple or detailed view |
+| `O` | Change the colors |
+| `X` | Remove every rule (you have to type `REMOVE ALL`) |
+| `G` | WireGuard setup |
+| `U` | Classic whiptail menus |
 
-```bash
-sudo apt install whiptail      # Debian/Ubuntu (Fedora: sudo dnf install newt)
-iptable-ui --whiptail
-```
+### Simple view and colors
 
-The web UI shows the same gateway status with switches for forwarding and apply-on-boot.
+Press `N` if you'd rather read sentences than codes. The header turns into something like
+"Forwarding is on. Connected through Tailscale (this server is 100.64.0.1 on it).", and each rule
+reads `On   Minecraft   port 25565 → 10.66.0.2:25565   TCP+UDP`. Press `N` again to go back.
 
-### Themes
+`O` cycles through a few color sets: Classic, Readable (bright and high contrast), Light terminal
+(for white backgrounds), Ocean, and Plain (no colors at all, good for screen readers). Both choices
+are saved, so the TUI opens the way you left it.
 
-Pick a theme from the **Theme** menu in the web UI header: System (follows your device's light or
-dark mode), Light, Dark, Ocean, Midnight, Sunset, High contrast, Nord, Dracula, Solarized, Gruvbox
-or Rose. The choice is saved in
-iptable-ui's database, so every browser you sign in from uses it.
+If colors don't show up in PuTTY, set Connection → Data → Terminal-type string to
+`xterm-256color`. Newer versions of iptable-ui handle this on their own.
 
-The TUI has its own look: press `O` (or pick **TUI look** in the `M` menu) to switch between
-Classic, Readable (bright, high contrast), Light terminal (for white backgrounds), Ocean and Plain
-(no colors, for monochrome terminals and screen readers). It is saved in the database too.
+### Whiptail mode
 
-Press `N` (or pick **Simple view** in the `M` menu) for a cleaner, plain-language view: the header
-reads "Forwarding is on.", "Connected through Tailscale (this server is 100.64.0.1 on it).",
-"After a reboot: your rules come back automatically.", and each rule reads like
-`On   Minecraft   port 25565 → 10.66.0.2:25565   TCP+UDP` (the port this server listens on, then
-where it forwards to). Press `N` again for the detailed view with
-interface names, codes and columns. The choice is saved in the database.
+If you like the blue menus from `raspi-config`, install whiptail
+(`apt install whiptail`, or `dnf install newt` on Fedora) and press `U`, or start with
+`iptable-ui --whiptail`. It covers the basics: rules, forwarding, apply on boot and the web UI. For
+backups, search, live rules and WireGuard setup, pick "Switch to the full TUI".
 
-### Traffic and VPN
+## The web UI
 
-- **Speeds:** the TUI header and the web UI show how fast each network adapter is receiving (RX)
-  and sending (TX). Each forward shows its own speed: ▼ toward your server, ▲ back to visitors
-  (on wide TUI screens, in a rule's `Enter` menu, and on each rule in the web UI). Speeds come from
-  counters the kernel already keeps and are measured every 2 seconds.
-- **VPN:** iptable-ui names the VPN it forwards through (WireGuard, Tailscale, NetBird, ZeroTier,
-  Nebula, OpenVPN) and shows this server's address on it. The web UI header follows it
-  ("TAILSCALE GATEWAY"), and WireGuard setup is hidden while another VPN is in use.
-- **Importing:** when another script made a TCP rule and a UDP rule for the same port and
-  destination, iptable-ui combines them into one TCP+UDP rule, including pairs imported earlier.
+The terminal prints a sign-in link when iptable-ui starts. Click it, or press `C` in the TUI to
+copy it, and the page opens already signed in. The address and token are partly hidden on screen,
+like `http://203.•••.•••.•••:8787`, so a screenshot doesn't give them away. Press `V` to show them in
+full, which is handy in PuTTY since it can't open links. The token changes every time iptable-ui
+starts.
 
-### Backups
+In the browser you can do everything the TUI does. It also has:
 
-iptable-ui backs up its database (all rules and settings such as the theme) to
-`~/iptable-ui-backups` of the user who ran `sudo` (for example `/home/ubuntu/iptable-ui-backups`,
-or `/root/iptable-ui-backups` when logged in as root). The files belong to that user, so you can
-download them with WinSCP, FileZilla or `scp` without root. The folder is shown on startup, in the
-web UI's Backups section and on the TUI backups screen. Change it under **Settings → Backup folder**
-or with `O` on the TUI backups screen; existing backups move with it. Backups are taken:
+- a theme menu at the top (twelve themes, saved for every browser you use),
+- a search box (press `/` to jump to it),
+- live speeds on each rule,
+- Backups, Live firewall rules and Settings at the bottom of the page.
+
+The web UI runs on port 8787. You can change that under Settings or with `P` in the TUI. The page
+follows you to the new port. Remember to allow the new port in your firewall and in your VPS
+provider's panel.
+
+**Please don't leave it wide open.** It's plain HTTP. Either bind it to localhost with
+`--web-address 127.0.0.1:8787` and reach it over an SSH tunnel
+(`ssh -L 8787:127.0.0.1:8787 you@your-vps`), or put it behind a reverse proxy with HTTPS, or at the
+very least only allow your own IP to reach that port.
+
+## Making sure it survives a reboot
+
+Two settings matter here. Both show at the top of the TUI and the web UI.
+
+- **IP forwarding** has to be on, or no forward will pass any traffic. iptable-ui saves the setting
+  in `/etc/sysctl.d/99-iptable-ui-forward.conf`, so it survives reboots. If some other config file
+  would switch it off again at boot, iptable-ui tells you which file.
+- **Apply rules on boot.** Firewall rules only live in memory, so a reboot wipes them. Turn this on
+  (`B`) and a small systemd service puts your rules back every time the server starts.
+
+You'll also see **Re-apply rules** (`R`, or `iptable-ui reconcile` on the command line). Normally
+you never need it, because every change is applied as you make it. It's for when something else
+wiped the firewall: another script, a ufw reload, Docker restarting, or an `iptables -F`.
+
+## Backups
+
+iptable-ui backs up its database:
 
 - when it starts,
-- every 5 minutes while it runs, but only when something changed,
-- whenever you press **Back up now** (web UI, Backups section) or `N` on the backups screen
-  (`S` in the TUI).
+- every 5 minutes while it's running, if something changed,
+- whenever you press "Back up now".
 
-**Download** saves a backup to your computer: in the web UI, click **Download** next to a backup.
-In the TUI, press `D` on a backup to get a link (`http://<server>:<port>/download/...`) that works
-for 10 minutes without signing in, for a browser or `curl -O`. The web UI must be on (`W`). The
-TUI also prints an `scp` command for copying the file directly.
+It also takes one before a restore and before "remove all rules", so both can be undone.
 
-**Upload** a backup file (for example one you downloaded earlier) with **Upload backup…** in the
-web UI. On the TUI backups screen, press `I` to import a file that is already on the server (copy it
-there with `scp` first). Only real iptable-ui databases with valid rules are accepted; the upload is
-added to the list, and the web UI offers to restore it right away.
+Backups land in `~/iptable-ui-backups` of the user who ran `sudo`, for example
+`/home/ubuntu/iptable-ui-backups`. The files belong to that user, so you can grab them with
+WinSCP, FileZilla or `scp` without needing root. You can move the folder in Settings, or with `O`
+on the TUI backup screen.
 
-**Restore** replaces every rule and setting with the backup and applies the rules to the firewall
-right away. The current state is backed up first (shown as "before a restore"), so you can undo a
-restore by restoring that backup. The newest 100 automatic backups and 20 before-restore backups
-are kept; manual backups are never deleted automatically. Host settings that live outside the
-database (IPv4 forwarding, apply on boot, WireGuard configs) are not part of a backup.
+From the web UI you can download any backup, upload one (say, from your old server), and restore.
+In the TUI (`S`):
 
-### Live Firewall Rules
+- `N` makes a backup,
+- `Enter` restores one,
+- `D` gives you a download link that works for 10 minutes,
+- `I` imports a backup file that's already on the server.
 
-To see the port forwards exactly as the firewall has them, with packet and byte counters, click
-**Live rules** in the web UI or press `L` in the TUI (also in the `M` menu). It runs:
+A restore replaces all your rules and settings and applies them straight away. The newest 100
+automatic backups are kept; the ones you make by hand stay until you delete them. IP forwarding,
+apply on boot and your WireGuard config live outside the database, so they're not part of a
+backup.
 
-```bash
-sudo iptables -t nat -L IPTUI_DNAT -n -v --line-numbers
-```
+## Seeing what's happening
 
-### Web UI Port
+- **Speeds.** The TUI header and the web UI show how fast each adapter is receiving (RX) and
+  sending (TX). Each forward has its own speed too: ▼ is traffic going to your server, ▲ is traffic
+  going back to visitors. In the TUI you'll see it on wide screens and in a rule's `Enter` menu.
+- **Live firewall rules** (`L`, or the button in the web UI) shows the forwards exactly as the
+  kernel has them, with packet counters. It's the same as running
+  `sudo iptables -t nat -L IPTUI_DNAT -n -v --line-numbers`, just easier to read. If the counters
+  go up when someone connects, traffic is reaching your VPS.
+- **Search** works in both UIs. Type part of a name, port or IP, or a keyword: `on`, `off`, `tcp`,
+  `udp`, `real`, `masked`. Words combine, so `udp off` finds switched-off rules that carry UDP.
 
-The web UI listens on port 8787 by default. Change it under **Settings** in the web UI, or press
-`P` in the TUI. The new port is saved in the database and used every time iptable-ui starts; a
-running web UI moves to it immediately and the browser page follows. Allow the new port in your
-firewall and at your VPS provider. Passing `--web-address` on the command line overrides the saved
-port for that run.
+## Showing visitors' real IPs
 
-### Removing All Rules
+By default your home server sees every connection as coming from the VPS. That's the setup that
+just works. If you need the real addresses, for example for bans on a game server or for
+meaningful logs, switch on "real client IP" for that rule: `I` in the TUI, or the "Use real IP"
+button in the web UI. It's off by default for a reason. Your home machine then has to send its
+replies back through the tunnel, or the forward stops working.
 
-**Remove all rules** (web UI **Settings**, or `X` in the TUI) deletes every forwarding rule from the
-database and the firewall at once. You must type `REMOVE ALL` to confirm, and a backup is taken
-first (listed as "before removing all"), so you can undo it by restoring that backup.
-
-### Searching Rules
-
-Both the TUI (`/`) and the web UI (the search box, or press `/`) filter rules as you type. Every
-word must match:
-
-- part of a name, port, destination address or `#ID`: `25565`, `10.66`, `minecraft`, `#3`
-- or a keyword: `on`/`up`/`enabled`, `off`/`down`/`disabled`, `tcp`, `udp` (rules on "both"
-  match either), `real`, `masked`
-
-Words combine: `udp off` shows disabled rules that carry UDP.
-
-**Re-apply rules** (`R` in the TUI, the button in the web UI, `iptable-ui reconcile` on the command
-line) rebuilds the firewall from your saved rules. Every change already applies automatically, so
-you only need it if something else wiped or changed the firewall: another script, a ufw or
-firewalld reload, Docker restarting, or `iptables -F`.
-
-### Gateway Settings
-
-**IPv4 forwarding** must be on for any forward to pass traffic. Turning it on or off writes
-`/etc/sysctl.d/99-iptable-ui-forward.conf`, applies the value immediately, and comments out a
-conflicting `net.ipv4.ip_forward` line in `/etc/sysctl.conf`. If another sysctl file would still
-undo the setting at boot, iptable-ui names that file so you can fix it.
-
-**Apply rules on boot** exists because iptables keeps rules only in memory, so a reboot erases
-them. Turning it on installs `/etc/systemd/system/iptable-ui-restore.service`, which runs
-`iptable-ui reconcile` with the current database and interfaces once the network is up. iptables
-keeps rules only in memory, so without it your forwards stay inactive after a reboot until
-iptable-ui runs again. If the binary moves or the interfaces change, the unit is refreshed the next
-time you start the app.
-
-### How a Forward Works
-
-For each rule, iptable-ui keeps its own chains (`IPTUI_*`) at the top of the built-in ones and
-rebuilds them on every change with a single `iptables-restore` call. Changes apply in one step no
-matter how many rules you have, are never half-applied, and never touch other tools' rules:
-
-| Chain | Rule |
-| --- | --- |
-| `nat IPTUI_DNAT` | Traffic from the internet (`-i ens3`) to the public port is redirected to the target |
-| `filter IPTUI_FWD` | The connection may go internet → tunnel (`-i ens3 -o wg0`), and replies tunnel → internet only. Works even when the `FORWARD` policy is `DROP` (Docker, ufw) |
-| `nat IPTUI_SNAT` | `MASQUERADE` into the tunnel so replies come back (skipped for real-client-IP rules) |
-| `mangle IPTUI_MSS` | TCP MSS clamping into the tunnel, so large transfers do not stall on the smaller tunnel MTU |
-
-**Turning a rule off** stops traffic immediately, including connections that were already open: a
-disabled rule leaves a `DROP` for connections that were redirected to its target. Deleting or
-editing a rule closes its open connections with `conntrack` when installed
-(`sudo apt install conntrack`); otherwise they end once idle. If another script also forwards the
-same port, iptable-ui says so; restart iptable-ui to take that rule over.
-
-### Keep the Real Client IP
-
-By default the destination server sees every visitor as the VPS (masked). Turn on **real client
-IP** for a rule when the server must see visitors' addresses, for example for game-server bans or
-logs: press `I` in the TUI, click **Use real IP** in the web UI, or pick the rule in whiptail mode.
-Turning it off again is instant and always safe. Replies then go straight to the visitor, so they must be routed back through the tunnel.
-
-This works when the destination is the **WireGuard home peer itself** (its tunnel address, such as
-`10.66.0.2`). On the home peer, edit `/etc/wireguard/wg0.conf`:
+This works when the destination is the WireGuard peer itself. On the home machine, change
+`/etc/wireguard/wg0.conf` like this:
 
 ```ini
 [Interface]
 Address = 10.66.0.2/24
 PrivateKey = <HOME_PRIVATE_KEY>
-# Do not route all traffic through the VPS; only replies from the tunnel address.
+# Don't send all traffic through the VPS, only the replies.
 Table = off
 PostUp = ip route add default dev wg0 table 51820; ip rule add from 10.66.0.2 table 51820 priority 100
 PostDown = ip rule del from 10.66.0.2 table 51820 priority 100; ip route flush table 51820
@@ -340,173 +271,114 @@ PostDown = ip rule del from 10.66.0.2 table 51820 priority 100; ip route flush t
 [Peer]
 PublicKey = <VPS_PUBLIC_KEY>
 Endpoint = <VPS_PUBLIC_IP>:51820
-# Allow replies to any visitor address through the tunnel.
+# Replies can go to any visitor address.
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 ```
 
-Then `sudo wg-quick down wg0 && sudo wg-quick up wg0`. Only traffic *from* `10.66.0.2` (replies
-to forwarded connections) uses the tunnel; the home peer's normal internet traffic is unchanged.
+Then run `sudo wg-quick down wg0 && sudo wg-quick up wg0`. Only replies from `10.66.0.2` use the
+tunnel. The rest of the home machine's internet stays as it was.
 
-Limits: a server elsewhere on the home LAN (such as `192.168.1.50`) sends replies to its own
-router, not the tunnel, so keep it masked. Tailscale does not accept replies to arbitrary internet
-addresses without exit-node routing, so keep Tailscale rules masked too.
+It won't work for a machine elsewhere on your home network, since that one replies through your
+router, or with Tailscale, unless you set up exit nodes. Leave those rules on the default.
 
-**Interface auto-detection** lets iptable-ui run on any setup without flags. An interface only
-counts as active when it is up *and* has a link (an unplugged NIC or idle Wi-Fi is skipped).
+## Coming from another script
 
-- **Public interface** (`-public-if`): the active interface with the lowest-metric default route.
-  VPN interfaces are never picked, so a Tailscale exit node or full-tunnel VPN does not fool it.
-- **VPN interface** (`-wg-if`), in order of preference:
-  1. The interface the system actually routes your saved forward destinations through. This also
-     finds tunnels with custom names.
-  2. An active tunnel with an IPv4 address (`wg*`, `tailscale*`, `tun*`, `tap*`, `zt*`,
-     `nebula*`, `wt*`, `ppp*`, or any WireGuard device), preferring `wg0`, then WireGuard devices.
-  3. A tunnel that exists but is down, then `wg0` as a last resort.
+If you've been forwarding ports with a script (yours or someone else's), you don't have to clean
+up first. On startup iptable-ui reads the firewall, imports forwards it recognizes, rebuilds them
+in its own rules and removes the old copies, so nothing runs twice. A TCP rule and a UDP rule for
+the same port and destination become one TCP+UDP rule. Rules it doesn't recognize, like ones with
+extra conditions or comments, are left alone.
 
-The chosen interfaces and the reason are printed at startup and shown in the TUI and web UI
-(`ROUTE ens3 -> wg0 UP`). If a guess is wrong, set it explicitly:
+Once iptable-ui manages a server, stop using the old script there. The script can't see
+iptable-ui's rules, and removing rules by line number will hit the wrong ones.
+
+## Commands and options
+
+| Command | What it does |
+| --- | --- |
+| `iptable-ui` | Start the terminal UI and the web UI |
+| `iptable-ui setup` | Run the setup wizard, then start |
+| `iptable-ui list` | Print your rules (doesn't need root) |
+| `iptable-ui reconcile` | Re-apply your saved rules to the firewall |
+| `iptable-ui install` | Copy this binary to `/usr/local/bin/iptable-ui` |
+| `iptable-ui wireguard status` | Check WireGuard and IP forwarding |
+| `iptable-ui wireguard install` | Install the WireGuard tools |
+| `iptable-ui wireguard guide` | Step-by-step WireGuard setup by hand |
+
+| Option | What it does |
+| --- | --- |
+| `--public-if ens3` | Set the internet-facing adapter instead of detecting it |
+| `--wg-if tailscale0` | Set the VPN adapter instead of detecting it |
+| `--web-address 127.0.0.1:8787` | Where the web UI listens (overrides the saved port) |
+| `--no-web` | Don't start the web UI |
+| `--whiptail` | Start in whiptail mode |
+| `--no-wizard` | Don't offer the setup wizard |
+| `--db /path/rules.db` | Use another database (default `/var/lib/iptable-ui/rules.db`) |
+
+The adapter detection is usually right. It looks at your default route for the internet side, and
+at where your rules actually route to for the VPN side. If it guesses wrong, say on a VPS with two
+network cards, set it with `--public-if` or `--wg-if`.
+
+## When something doesn't work
+
+**A forward doesn't connect.** Go through these in order:
+
+1. Is IP forwarding on? It's at the top of both UIs.
+2. Is the VPN up? Look for `UP` next to your VPN adapter. Can the VPS reach the home machine? Try
+   `ping 10.66.0.2` from the VPS.
+3. Does your VPS provider have its own firewall in their panel? Open the public port there too.
+4. Is the service at home actually listening, and does the home machine's firewall allow
+   connections from the VPN?
+5. Open Live firewall rules and connect from outside. If the packet counter doesn't move, the
+   traffic never reached the VPS. If it does move, the problem is on the home side.
+
+**I switched a rule off but the port still works.** Already-open connections are cut off as soon
+as you switch a rule off. If new connections still get through, another script is probably
+forwarding the same port. iptable-ui warns you about that. Restart iptable-ui and it takes that
+rule over.
+
+**My forwards are gone after a reboot.** Turn on apply on boot (`B`).
+
+**The web UI won't load.** Check the port is allowed in your firewall and at your VPS provider,
+and that the web UI is on (`W`). If you see `<this-server-ip>` in the link, put in your VPS's
+public IP yourself.
+
+**Removing or editing a rule doesn't cut open connections right away.** Install `conntrack`
+(`apt install conntrack`) and iptable-ui will close them immediately. Without it they end once
+they go idle.
+
+## How it works
+
+iptable-ui keeps its rules in its own chains (`IPTUI_DNAT`, `IPTUI_FWD`, `IPTUI_SNAT`,
+`IPTUI_MSS`) and hooks them in at the top of the built-in ones. Every change rebuilds those chains
+in a single `iptables-restore` call. That means a change is never half applied, it's quick even with
+lots of rules, and rules from Docker, ufw or anything else are never touched.
+
+For each forward it:
+
+- redirects the public port to your server,
+- allows that traffic through toward the tunnel and the replies back,
+- rewrites the source address so replies return through the tunnel (unless you asked for real
+  client IPs),
+- clamps TCP packet sizes so big downloads don't stall on the tunnel's smaller MTU.
+
+Switching a rule off also drops connections that were already open, so off really means off.
+
+Rules and settings live in a SQLite database at `/var/lib/iptable-ui/rules.db`.
+
+## Building from source
+
+You'll need Go 1.23 or newer.
 
 ```bash
-iptable-ui -wg-if tailscale0
+git clone https://github.com/HeresJohnny320/iptable-UI.git
+cd iptable-UI
+go test ./...
+./build-linux.sh amd64   # or arm64; the binary ends up in dist/
 ```
 
-## 🔧 Configuration
+## Contributing
 
-### Database Location
-
-The application uses SQLite for storage:
-
-- **As root**: `/var/lib/iptable-ui/rules.db`
-- **As regular user**: `~/.local/share/iptable-ui/rules.db`
-
-You can specify a custom database path:
-
-```bash
-iptable-ui -db /path/to/custom/rules.db
-```
-
-### WireGuard Setup
-
-The application can help you set up WireGuard:
-
-```bash
-# Install WireGuard tools
-iptable-ui wireguard install
-
-# Check WireGuard status
-iptable-ui wireguard status
-```
-
-## 📝 Creating Port Forwarding Rules
-
-### Web Interface Method
-
-1. Click "Add Rule"
-2. Fill in the form:
-   - **Name**: Descriptive name for the rule
-   - **Public Port**: The port exposed on your public interface
-   - **Destination IP**: The internal IP to forward to
-   - **Destination Port**: The port on the destination IP
-   - **Protocol**: TCP or UDP
-3. Click "Save"
-4. Enable the rule with the toggle switch
-
-### Terminal Method
-
-Use the TUI interface to add and manage rules.
-
-## 🔥 Important Notes
-
-### Security Warnings
-
-1. **Web Interface Security**: The web interface is served over plain HTTP by default. For production use:
-   - Bind to localhost only: `iptable-ui -web-address 127.0.0.1:8787`
-   - Use a reverse proxy with TLS
-   - Restrict access with firewall rules
-
-2. **Root Access**: Most operations require root access. Use sudo carefully.
-
-3. **Firewall Rules**: The application manages iptables rules. Review the rules before applying changes.
-
-### WireGuard Configuration
-
-The application does NOT create WireGuard keys or peer configurations. You need to:
-1. Generate keys manually
-2. Create WireGuard configuration files
-3. Set up proper routes and firewall rules
-
-See the WireGuard guide within the TUI for detailed instructions.
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-#### Permission Denied
-
-```
-Error: open database: permission denied
-```
-
-Solution: Ensure the database directory exists and is writable:
-```bash
-sudo mkdir -p /var/lib/iptable-ui
-sudo chown $USER:$USER /var/lib/iptable-ui
-```
-
-#### iptables Commands Fail
-
-Make sure iptables is installed:
-```bash
-sudo apt-get install iptables
-```
-
-#### WireGuard Not Found
-
-Install WireGuard tools:
-```bash
-iptable-ui wireguard install
-```
-
-## 📚 Additional Information
-
-### Architecture
-
-- **Frontend**: Web interface with real-time updates
-- **Backend**: Go application with SQLite database
-- **Firewall**: Uses iptables for port forwarding
-- **WireGuard**: Integrates with wg-quick for interface management
-
-### Database Schema
-
-The SQLite database stores:
-- Port forwarding rules
-- Rule enable/disable state
-- Creation and modification timestamps
-
-### Rule Reconciliation
-
-The application automatically:
-1. Discovers existing iptables rules on startup
-2. Imports them into the database
-3. Syncs enabled rules to iptables
-4. Removes legacy rules on reconcile
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Open a Pull Request
-
-## 📜 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 📞 Support
-
-For issues and questions, please open an issue on GitHub.
-
----
+Bug reports and pull requests are welcome. If something didn't work on your setup, open an issue
+and mention your distro, which VPN you use, and what `iptable-ui list` shows.
