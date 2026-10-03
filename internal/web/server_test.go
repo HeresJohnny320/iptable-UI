@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
+	"github.com/HeresJohnny320/iptable-ui/internal/system"
 	wgsetup "github.com/HeresJohnny320/iptable-ui/internal/wireguard"
 )
 
@@ -36,17 +38,40 @@ func (testWireGuardSetup) UpdateExisting(_ context.Context, request wgsetup.Edit
 	return wgsetup.EditConfigResult{Config: wgsetup.ExistingConfig{InterfaceName: request.InterfaceName}, Applied: true, Message: "synced"}, nil
 }
 
+type testSystem struct {
+	status system.Status
+	err    error
+}
+
+func (s *testSystem) Status(context.Context) system.Status { return s.status }
+
+func (s *testSystem) SetForwarding(_ context.Context, enabled bool) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.status.Forwarding = enabled
+	return nil
+}
+
+func (s *testSystem) SetBootRestore(_ context.Context, enabled bool) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.status.BootRestore = enabled
+	return nil
+}
+
 func TestHandlerAuthenticatesAndManagesRules(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "rules.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	handler := Handler("session-secret", app.Service{Store: database, Firewall: testFirewall{}}, testWireGuardSetup{})
+	handler := Handler("session-secret", app.Service{Store: database, Firewall: testFirewall{}}, testWireGuardSetup{}, &testSystem{})
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
 	pageHTML := page.Body.String()
-	if page.Code != http.StatusOK || !strings.Contains(pageHTML, "id=\"login\"") || !strings.Contains(pageHTML, "iptable-ui access") || !strings.Contains(pageHTML, "id=\"theme-toggle\"") || !strings.Contains(pageHTML, "data-theme=\"dark\"") || !strings.Contains(pageHTML, "Edit an existing interface") || !strings.Contains(pageHTML, "Forward path") || !strings.Contains(pageHTML, "id=\"existing-wg-form\"") || !strings.Contains(pageHTML, "sync with the terminal UI automatically") || !strings.Contains(pageHTML, "setInterval(() => void load(), 1000)") {
+	if page.Code != http.StatusOK || !strings.Contains(pageHTML, "id=\"login\"") || !strings.Contains(pageHTML, "iptable-ui access") || !strings.Contains(pageHTML, "id=\"theme-toggle\"") || !strings.Contains(pageHTML, "data-theme=\"dark\"") || !strings.Contains(pageHTML, "Edit an existing interface") || !strings.Contains(pageHTML, "Forward path") || !strings.Contains(pageHTML, "id=\"existing-wg-form\"") || !strings.Contains(pageHTML, "syncs with the terminal UI") || !strings.Contains(pageHTML, "Re-apply rules") || !strings.Contains(pageHTML, "Apply rules on boot") || !strings.Contains(pageHTML, "id=\"search\"") || !strings.Contains(pageHTML, "re-applied automatically at startup") || !strings.Contains(pageHTML, "setInterval(() => void load(), 1000)") {
 		t.Fatalf("login page was not served: %d", page.Code)
 	}
 	if page.Header().Get("X-Frame-Options") != "DENY" {
@@ -82,7 +107,7 @@ func TestHandlerAuthenticatesAndManagesRules(t *testing.T) {
 	editRequest.Header.Set("Authorization", "Bearer session-secret")
 	editResponse := httptest.NewRecorder()
 	handler.ServeHTTP(editResponse, editRequest)
-	if editResponse.Code != http.StatusNoContent {
+	if editResponse.Code != http.StatusOK {
 		t.Fatalf("rule edit returned %d: %s", editResponse.Code, editResponse.Body.String())
 	}
 	rules, err := database.List(context.Background())
@@ -121,7 +146,7 @@ func TestRuntimeToggleStartsAndStopsLoopbackServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	runtime := NewRuntime("session-secret", "0.0.0.0:0", app.Service{Store: database, Firewall: testFirewall{}}, testWireGuardSetup{})
+	runtime := NewRuntime("session-secret", "0.0.0.0:0", app.Service{Store: database, Firewall: testFirewall{}}, testWireGuardSetup{}, nil)
 	enabled, err := runtime.Toggle()
 	if err != nil || !enabled || !runtime.Enabled() {
 		t.Fatalf("start web UI: enabled=%v, err=%v", enabled, err)
@@ -145,5 +170,47 @@ func TestRuntimeToggleStartsAndStopsLoopbackServer(t *testing.T) {
 	enabled, err = runtime.Toggle()
 	if err != nil || enabled || runtime.Enabled() {
 		t.Fatalf("stop web UI: enabled=%v, err=%v", enabled, err)
+	}
+}
+
+func TestSystemSettingsAPI(t *testing.T) {
+	host := &testSystem{status: system.Status{VPNInterface: "wg0", VPNUp: true}}
+	handler := Handler("session-secret", app.Service{}, nil, host)
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer session-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	status := send(http.MethodGet, "/api/system", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"vpnInterface":"wg0"`) || !strings.Contains(status.Body.String(), `"forwarding":false`) {
+		t.Fatalf("status returned %d: %s", status.Code, status.Body.String())
+	}
+	forwarding := send(http.MethodPut, "/api/system/forwarding", `{"enabled":true}`)
+	if forwarding.Code != http.StatusOK || !host.status.Forwarding || !strings.Contains(forwarding.Body.String(), `"forwarding":true`) {
+		t.Fatalf("forwarding toggle returned %d: %s", forwarding.Code, forwarding.Body.String())
+	}
+	boot := send(http.MethodPut, "/api/system/boot-restore", `{"enabled":true}`)
+	if boot.Code != http.StatusOK || !host.status.BootRestore {
+		t.Fatalf("boot restore toggle returned %d: %s", boot.Code, boot.Body.String())
+	}
+	if missing := send(http.MethodPut, "/api/system/forwarding", `{}`); missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing enabled flag returned %d", missing.Code)
+	}
+	if unknown := send(http.MethodPut, "/api/system/unknown", `{"enabled":true}`); unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown setting returned %d", unknown.Code)
+	}
+	host.err = errors.New("sysctl override")
+	if failed := send(http.MethodPut, "/api/system/forwarding", `{"enabled":false}`); failed.Code != http.StatusUnprocessableEntity || !strings.Contains(failed.Body.String(), "sysctl override") {
+		t.Fatalf("failed toggle returned %d: %s", failed.Code, failed.Body.String())
+	}
+	unavailable := httptest.NewRequest(http.MethodGet, "/api/system", nil)
+	unavailable.Header.Set("Authorization", "Bearer session-secret")
+	response := httptest.NewRecorder()
+	Handler("session-secret", app.Service{}, nil, nil).ServeHTTP(response, unavailable)
+	if response.Code != http.StatusNotImplemented {
+		t.Fatalf("missing host control returned %d", response.Code)
 	}
 }

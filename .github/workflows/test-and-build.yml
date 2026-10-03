@@ -48,12 +48,16 @@ jobs:
         run: |
           chmod +x build-linux.sh
           ./build-linux.sh ${{ matrix.arch }}
+          # A tarball keeps the executable bit, so no chmod is needed after download.
+          tar -C dist -czf dist/iptable-ui-linux-${{ matrix.arch }}.tar.gz iptable-ui-linux-${{ matrix.arch }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: iptable-ui-linux-${{ matrix.arch }}
-          path: dist/iptable-ui-linux-${{ matrix.arch }}
+          path: |
+            dist/iptable-ui-linux-${{ matrix.arch }}
+            dist/iptable-ui-linux-${{ matrix.arch }}.tar.gz
           retention-days: 7
 
   release:
@@ -87,5 +91,7 @@ jobs:
           files: |
             dist/iptable-ui-linux-amd64
             dist/iptable-ui-linux-arm64
+            dist/iptable-ui-linux-amd64.tar.gz
+            dist/iptable-ui-linux-arm64.tar.gz
           prerelease: true
           fail_on_unmatched_files: true

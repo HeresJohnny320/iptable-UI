@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -14,15 +15,18 @@ import (
 var ErrNotFound = errors.New("rule not found")
 
 type Rule struct {
-	ID         int64     `json:"id"`
-	Name       string    `json:"name"`
-	PublicPort uint16    `json:"publicPort"`
-	DestIP     string    `json:"destIP"`
-	DestPort   uint16    `json:"destPort"`
-	Protocol   string    `json:"protocol"`
-	Enabled    bool      `json:"enabled"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	PublicPort uint16 `json:"publicPort"`
+	DestIP     string `json:"destIP"`
+	DestPort   uint16 `json:"destPort"`
+	Protocol   string `json:"protocol"`
+	Enabled    bool   `json:"enabled"`
+	// KeepClientIP skips MASQUERADE so the destination sees the real client
+	// address. Replies must then route back through the tunnel.
+	KeepClientIP bool      `json:"keepClientIP"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type Store struct {
@@ -67,11 +71,33 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
+	columns, err := s.db.Query(`SELECT name FROM pragma_table_info('rules')`)
+	if err != nil {
+		return fmt.Errorf("read database columns: %w", err)
+	}
+	defer columns.Close()
+	hasKeepClientIP := false
+	for columns.Next() {
+		var name string
+		if err := columns.Scan(&name); err != nil {
+			return fmt.Errorf("read database columns: %w", err)
+		}
+		hasKeepClientIP = hasKeepClientIP || name == "keep_client_ip"
+	}
+	if err := columns.Err(); err != nil {
+		return fmt.Errorf("read database columns: %w", err)
+	}
+	columns.Close()
+	if !hasKeepClientIP {
+		if _, err := s.db.Exec(`ALTER TABLE rules ADD COLUMN keep_client_ip INTEGER NOT NULL DEFAULT 0 CHECK(keep_client_ip IN (0, 1))`); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+	}
 	return nil
 }
 
 func (s *Store) List(ctx context.Context) ([]Rule, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, public_port, dest_ip, dest_port, protocol, enabled, created_at, updated_at FROM rules ORDER BY public_port, protocol, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, public_port, dest_ip, dest_port, protocol, enabled, keep_client_ip, created_at, updated_at FROM rules ORDER BY public_port, protocol, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list rules: %w", err)
 	}
@@ -95,7 +121,7 @@ func (s *Store) Add(ctx context.Context, rule Rule) (Rule, error) {
 		return Rule{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.db.ExecContext(ctx, `INSERT INTO rules(name, public_port, dest_ip, dest_port, protocol, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?)`, rule.Name, rule.PublicPort, rule.DestIP, rule.DestPort, rule.Protocol, now, now)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO rules(name, public_port, dest_ip, dest_port, protocol, enabled, keep_client_ip, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)`, rule.Name, rule.PublicPort, rule.DestIP, rule.DestPort, rule.Protocol, rule.KeepClientIP, now, now)
 	if err != nil {
 		return Rule{}, fmt.Errorf("add rule: %w", err)
 	}
@@ -113,7 +139,7 @@ func (s *Store) Update(ctx context.Context, rule Rule) (Rule, error) {
 	if err := validateRule(rule); err != nil {
 		return Rule{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE rules SET name = ?, public_port = ?, dest_ip = ?, dest_port = ?, protocol = ?, updated_at = ? WHERE id = ?`, rule.Name, rule.PublicPort, rule.DestIP, rule.DestPort, rule.Protocol, time.Now().UTC().Format(time.RFC3339Nano), rule.ID)
+	result, err := s.db.ExecContext(ctx, `UPDATE rules SET name = ?, public_port = ?, dest_ip = ?, dest_port = ?, protocol = ?, keep_client_ip = ?, updated_at = ? WHERE id = ?`, rule.Name, rule.PublicPort, rule.DestIP, rule.DestPort, rule.Protocol, rule.KeepClientIP, time.Now().UTC().Format(time.RFC3339Nano), rule.ID)
 	if err != nil {
 		return Rule{}, fmt.Errorf("update rule: %w", err)
 	}
@@ -124,7 +150,7 @@ func (s *Store) Update(ctx context.Context, rule Rule) (Rule, error) {
 	if count == 0 {
 		return Rule{}, ErrNotFound
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, public_port, dest_ip, dest_port, protocol, enabled, created_at, updated_at FROM rules WHERE id = ?`, rule.ID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, public_port, dest_ip, dest_port, protocol, enabled, keep_client_ip, created_at, updated_at FROM rules WHERE id = ?`, rule.ID)
 	if err != nil {
 		return Rule{}, fmt.Errorf("read updated rule: %w", err)
 	}
@@ -244,12 +270,13 @@ type rowScanner interface {
 
 func scanRule(row rowScanner) (Rule, error) {
 	var rule Rule
-	var enabled int
+	var enabled, keepClientIP int
 	var createdAt, updatedAt string
-	if err := row.Scan(&rule.ID, &rule.Name, &rule.PublicPort, &rule.DestIP, &rule.DestPort, &rule.Protocol, &enabled, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&rule.ID, &rule.Name, &rule.PublicPort, &rule.DestIP, &rule.DestPort, &rule.Protocol, &enabled, &keepClientIP, &createdAt, &updatedAt); err != nil {
 		return Rule{}, fmt.Errorf("scan rule: %w", err)
 	}
 	rule.Enabled = enabled == 1
+	rule.KeepClientIP = keepClientIP == 1
 	rule.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	rule.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return rule, nil
@@ -269,4 +296,33 @@ func validateRule(rule Rule) error {
 	default:
 		return errors.New("protocol must be tcp, udp, or both")
 	}
+}
+
+// Matches reports whether the rule matches every word of a search query.
+// A word can be part of the name, a port, the destination address or the
+// #ID, or one of the keywords on/up/enabled, off/down/disabled, tcp, udp,
+// real or masked. The web UI's search mirrors these rules.
+func (r Rule) Matches(query string) bool {
+	text := strings.ToLower(fmt.Sprintf("#%d %s :%d %s:%d %s", r.ID, r.Name, r.PublicPort, r.DestIP, r.DestPort, r.Protocol))
+	for _, word := range strings.Fields(strings.ToLower(query)) {
+		var ok bool
+		switch word {
+		case "on", "up", "enabled":
+			ok = r.Enabled
+		case "off", "down", "disabled":
+			ok = !r.Enabled
+		case "tcp", "udp":
+			ok = r.Protocol == word || r.Protocol == "both"
+		case "real":
+			ok = r.KeepClientIP
+		case "masked":
+			ok = !r.KeepClientIP
+		default:
+			ok = strings.Contains(text, word)
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
 }

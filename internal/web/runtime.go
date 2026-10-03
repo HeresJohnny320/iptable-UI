@@ -17,12 +17,13 @@ type Runtime struct {
 	address  string
 	service  service
 	setup    WireGuardSetup
+	system   SystemControl
 	server   *http.Server
 	listener net.Listener
 }
 
-func NewRuntime(token, address string, rules service, setup WireGuardSetup) *Runtime {
-	return &Runtime{token: token, address: address, service: rules, setup: setup}
+func NewRuntime(token, address string, rules service, setup WireGuardSetup, host SystemControl) *Runtime {
+	return &Runtime{token: token, address: address, service: rules, setup: setup, system: host}
 }
 
 func (r *Runtime) Toggle() (bool, error) {
@@ -42,7 +43,7 @@ func (r *Runtime) Toggle() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	server := &http.Server{Handler: Handler(r.token, r.service, r.setup), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	server := &http.Server{Handler: Handler(r.token, r.service, r.setup, r.system), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	r.listener = listener
 	r.server = server
 	go func() {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/hex"
-	"strings"
 	"testing"
 )
 
@@ -20,25 +19,6 @@ func TestNewTokenRotatesWithStrongRandomValue(t *testing.T) {
 	}
 	if _, err := hex.DecodeString(first); err != nil {
 		t.Fatalf("token is not hexadecimal: %v", err)
-	}
-}
-
-func TestPackageInstallArgs(t *testing.T) {
-	tests := []struct {
-		manager     string
-		packageName string
-		want        string
-	}{
-		{manager: "apt-get", packageName: "wireguard", want: "install -y wireguard"},
-		{manager: "dnf", packageName: "wireguard-tools", want: "install -y wireguard-tools"},
-		{manager: "pacman", packageName: "wireguard-tools", want: "-S --noconfirm wireguard-tools"},
-	}
-	for _, test := range tests {
-		args := packageInstallArgs(test.manager, test.packageName)
-		joined := strings.Join(args, " ")
-		if joined != test.want {
-			t.Errorf("%s args = %q, want %q", test.manager, joined, test.want)
-		}
 	}
 }
 
@@ -70,5 +50,28 @@ func TestPublicWebBindDetection(t *testing.T) {
 	}
 	if !isPublicWebBind("0.0.0.0:8787") || !isPublicWebBind("[::]:8787") {
 		t.Fatal("wildcard binds should be considered public")
+	}
+}
+
+func TestNeedsRoot(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{nil, true},
+		{[]string{"--web-address", "127.0.0.1:8787"}, true},
+		{[]string{"setup"}, true},
+		{[]string{"reconcile"}, true},
+		{[]string{"install"}, true},
+		{[]string{"wireguard", "install"}, true},
+		{[]string{"list"}, false},
+		{[]string{"wireguard", "status"}, false},
+		{[]string{"--help"}, false},
+		{[]string{"setup", "-h"}, false},
+	}
+	for _, test := range tests {
+		if got := needsRoot(test.args); got != test.want {
+			t.Errorf("needsRoot(%q) = %v, want %v", test.args, got, test.want)
+		}
 	}
 }

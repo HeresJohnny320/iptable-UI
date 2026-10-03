@@ -36,8 +36,26 @@
     .button.primary { color: white; background: var(--green); border-color: var(--green); }
     :root[data-theme="dark"] .button.primary { color: #102018; }
     .button:hover { filter: brightness(.96); }
+    .host { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin-top: 18px; background: var(--line); border-top: 2px solid var(--table-top); }
+    .host[hidden] { display: none; }
+    .host-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 12px 14px; background: var(--surface); }
+    .host-label { display: block; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .host-value { display: block; margin-top: 3px; font-weight: 700; color: var(--disabled); overflow-wrap: anywhere; }
+    .host-value.on { color: var(--enabled); }
+    .host-help { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .switch { position: relative; flex: none; width: 52px; height: 30px; padding: 0; border: 1px solid var(--input-line); border-radius: 15px; background: var(--input); }
+    .switch::after { content: ''; position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 50%; background: var(--muted); transition: transform .15s ease; }
+    .switch[aria-checked="true"] { border-color: var(--green); background: var(--green); }
+    .switch[aria-checked="true"]::after { transform: translateX(22px); background: var(--surface-strong); }
+    .switch:disabled { opacity: .55; cursor: wait; }
+    .switch:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) { .switch::after { transition: none; } }
     .notice { display: none; margin: 16px 0; padding: 10px 12px; border-left: 3px solid var(--notice-line); background: var(--notice-bg); color: var(--notice-text); font-size: 14px; }
     .layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 26px; align-items: start; margin-top: 22px; }
+    .search-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .search-row input { flex: 1; min-width: 0; }
+    .search-count { color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .table-wrap { overflow-x: auto; border-top: 2px solid var(--table-top); background: var(--surface); container-type: inline-size; }
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
     th { padding: 11px 12px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; border-bottom: 1px solid var(--line); }
@@ -58,6 +76,7 @@
     .action-button { min-height: 42px; border: 1px solid var(--line); border-radius: 4px; padding: 8px 11px; color: var(--text); background: var(--surface-strong); font-size: 13px; font-weight: 600; white-space: nowrap; }
     .action-button:hover { border-color: var(--green); color: var(--green); }
     .action-button.remove { color: #9d3933; }
+    .action-button:disabled { opacity: .6; cursor: wait; }
     :root[data-theme="dark"] .action-button.remove { color: #f08b81; }
     .action-button:focus-visible, .button:focus-visible, .theme-toggle:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
     .empty { padding: 34px 16px; color: var(--muted); text-align: center; }
@@ -118,9 +137,10 @@
       .rule-path-cell, .rule-protocol-cell, .actions-cell { grid-column: 1 / -1; }
       .rule-path-cell { padding-top: 11px; border-top: 1px solid var(--row-line) !important; }
       .route-flow { justify-content: flex-start; flex-wrap: wrap; }
-      .actions-cell { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; padding-top: 10px !important; border-top: 1px solid var(--row-line) !important; }
+      .actions-cell { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding-top: 10px !important; border-top: 1px solid var(--row-line) !important; }
       .action-button { width: 100%; min-height: 44px; padding: 7px 5px; white-space: normal; }
       .setup-grid { grid-template-columns: minmax(0, 1fr); }
+      .host { grid-template-columns: minmax(0, 1fr); }
       .existing-wg .load-row { grid-template-columns: minmax(0, 1fr); }
       .existing-wg .load-row .button { width: 100%; }
       .wg-edit-actions .button { width: 100%; }
@@ -131,16 +151,22 @@
 <body>
   <header class="bar"><div class="brand"><span class="mark">IP</span> iptable-ui <small>WIREGUARD GATEWAY</small></div><div class="bar-controls"><button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">Dark mode</button><small id="connection">AUTHENTICATED SESSION</small></div></header>
   <main>
-    <section class="heading"><div><h1>Forwarding rules</h1><p class="sub">Rule changes sync with the terminal UI automatically.</p></div><div class="actions"><button class="button" id="refresh">Refresh</button><button class="button primary" id="reconcile">Restore enabled rules</button></div></section>
+    <section class="heading"><div><h1>Forwarding rules</h1><p class="sub">Every change applies to the firewall right away and syncs with the terminal UI. <strong>Re-apply rules</strong> rebuilds the firewall from your saved rules; you only need it if another tool (a script, ufw, Docker, <code>iptables -F</code>) wiped or changed them.</p></div><div class="actions"><button class="button" id="refresh" title="Reload the rule list from the server">Refresh list</button><button class="button primary" id="reconcile" title="Rebuild the firewall from your saved rules">Re-apply rules</button></div></section>
+    <section class="host" id="host" aria-label="Gateway settings" hidden>
+      <div class="host-item"><div><span class="host-label" id="forwarding-label">IPv4 forwarding</span><span class="host-value" id="forwarding-state"></span><span class="host-help" id="forwarding-help">Lets this server pass traffic on. Must be on for any forward to work.</span></div><button class="switch" id="forwarding-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="forwarding-label" aria-describedby="forwarding-help"></button></div>
+      <div class="host-item"><div><span class="host-label">Route (public → VPN)</span><span class="host-value" id="vpn-state"></span><span class="host-help">Internet adapter → VPN tunnel that forwards travel through.</span></div></div>
+      <div class="host-item"><div><span class="host-label" id="boot-label">Apply rules on boot</span><span class="host-value" id="boot-state"></span><span class="host-help" id="boot-help">Firewall rules vanish on restart; when on, your saved rules are re-applied automatically at startup.</span></div><button class="switch" id="boot-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="boot-label" aria-describedby="boot-help"></button></div>
+    </section>
     <p class="security-note">This admin UI uses HTTP. Use loopback with an SSH tunnel or terminate TLS at a trusted reverse proxy; do not expose the app port to untrusted networks.</p>
     <div class="notice" id="notice" role="status"></div>
     <div class="layout">
-      <section><div class="table-wrap"><table><thead><tr><th>State</th><th>Rule</th><th>Forward path</th><th>Protocol</th><th>Actions</th></tr></thead><tbody id="rules"></tbody></table><div class="empty" id="empty">No forwarding rules saved.</div></div></section>
+      <section><div class="search-row"><label class="visually-hidden" for="search">Search rules</label><input id="search" type="search" placeholder="Search port, IP, name, #ID, on/off, tcp/udp, real/masked  (press /)" autocomplete="off" spellcheck="false"><span class="search-count" id="search-count" aria-live="polite"></span></div><div class="table-wrap"><table><thead><tr><th>State</th><th>Rule</th><th>Forward path</th><th>Protocol</th><th>Actions</th></tr></thead><tbody id="rules"></tbody></table><div class="empty" id="empty">No forwarding rules saved.</div></div></section>
       <form class="form" id="add-form"><h2 id="form-title">Add a forward</h2>
         <label for="name">Label</label><input id="name" name="name" maxlength="80" placeholder="Game server">
         <div class="pair"><div><label for="public-port">Public port</label><input id="public-port" name="publicPort" type="number" min="1" max="65535" required></div><div><label for="dest-port">Target port</label><input id="dest-port" name="destPort" type="number" min="1" max="65535" required></div></div>
         <label for="dest-ip">Destination IPv4</label><input id="dest-ip" name="destIP" inputmode="decimal" placeholder="10.0.0.5" required>
         <label for="protocol">Protocol</label><select id="protocol" name="protocol"><option value="both">TCP + UDP</option><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+        <label for="keep-client-ip">Client IP the server sees</label><select id="keep-client-ip" name="keepClientIP"><option value="false">VPS tunnel IP (works everywhere)</option><option value="true">Real client IP (needs a return route at home)</option></select>
         <button class="button primary" id="save-rule" type="submit">Save and apply</button>
         <button class="button" id="cancel-edit" type="button" hidden>Cancel edit</button>
       </form>
@@ -203,8 +229,45 @@
     let token = '';
     try { token = sessionStorage.getItem('iptable-ui-token') || ''; } catch (_) {}
     let editingRuleId = null;
+    let allRules = [];
+    const search = document.querySelector('#search');
+    search.addEventListener('input', () => render());
+    search.addEventListener('keydown', event => { if (event.key === 'Escape') { search.value = ''; render(); } });
+    document.addEventListener('keydown', event => {
+      const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+      if (event.key === '/' && !typing && login.hidden) { event.preventDefault(); search.focus(); }
+    });
     let refreshingRules = false;
     let rulePollTimer = null;
+    const host = document.querySelector('#host');
+    const forwardingToggle = document.querySelector('#forwarding-toggle');
+    const bootToggle = document.querySelector('#boot-toggle');
+    function showHostValue(selector, on, text) {
+      const element = document.querySelector(selector);
+      element.textContent = text;
+      element.classList.toggle('on', on);
+    }
+    function renderHost(status) {
+      showHostValue('#forwarding-state', status.forwarding, status.forwarding ? 'Enabled' : 'Disabled · forwards blocked');
+      showHostValue('#vpn-state', status.vpnUp, `${status.publicInterface} → ${status.vpnInterface} ${status.vpnUp ? 'up' : 'down'}`);
+      showHostValue('#boot-state', status.bootRestore, status.bootRestore ? 'On · rules survive reboot' : 'Off · rules lost on reboot');
+      forwardingToggle.setAttribute('aria-checked', String(status.forwarding));
+      bootToggle.setAttribute('aria-checked', String(status.bootRestore));
+      host.hidden = false;
+    }
+    async function loadHost() {
+      try { renderHost(await api('/api/system')); } catch (_) { host.hidden = true; }
+    }
+    async function changeHost(button, path, label) {
+      const enabled = button.getAttribute('aria-checked') !== 'true';
+      if (button === forwardingToggle && !enabled && !confirm('Disable IPv4 forwarding? Every port forward stops passing traffic.')) return;
+      button.disabled = true;
+      try { renderHost(await api(path, { method: 'PUT', body: JSON.stringify({ enabled }) })); message(`${label} ${enabled ? 'enabled' : 'disabled'}.`); }
+      catch (error) { message(error.message); await loadHost(); }
+      finally { button.disabled = false; }
+    }
+    forwardingToggle.onclick = () => changeHost(forwardingToggle, '/api/system/forwarding', 'IPv4 forwarding');
+    bootToggle.onclick = () => changeHost(bootToggle, '/api/system/boot-restore', 'Apply rules on boot');
     function message(text) { notice.textContent = text; notice.style.display = text ? 'block' : 'none'; }
     function startRulePolling() {
       if (rulePollTimer === null) rulePollTimer = setInterval(() => void load(), 1000);
@@ -220,39 +283,77 @@
       if (!token || !login.hidden || refreshingRules) return;
       refreshingRules = true;
       try {
-        const rows = await api('/api/rules');
-        const body = document.querySelector('#rules'); body.replaceChildren();
-        document.querySelector('#empty').hidden = rows.length > 0;
-        for (const rule of rows) {
-          const row = document.createElement('tr');
-          const state = document.createElement('span'); state.className = `state${rule.enabled ? '' : ' off'}`; state.textContent = rule.enabled ? 'Enabled' : 'Disabled';
-          const stateCell = document.createElement('td'); stateCell.className = 'rule-state-cell'; stateCell.append(state); row.append(stateCell);
-          const nameCell = document.createElement('td'); nameCell.className = 'rule-name-cell';
-          const name = document.createElement('span'); name.className = 'rule-name'; name.textContent = rule.name || 'Unnamed forward';
-          const id = document.createElement('small'); id.className = 'rule-id'; id.textContent = `Rule #${rule.id}`;
-          nameCell.append(name, id); row.append(nameCell);
-          const pathCell = document.createElement('td'); pathCell.className = 'rule-path-cell';
-          const path = document.createElement('div'); path.className = 'route-flow route';
-          const publicSide = document.createElement('span'); publicSide.className = 'route-endpoint';
-          const publicLabel = document.createElement('small'); publicLabel.textContent = 'Public';
-          const targetSide = document.createElement('span'); targetSide.className = 'route-endpoint';
-          const targetLabel = document.createElement('small'); targetLabel.textContent = 'Target';
-          const publicEndpoint = document.createElement('span'); publicEndpoint.textContent = `:${rule.publicPort}`;
-          const arrow = document.createElement('span'); arrow.className = 'route-arrow'; arrow.setAttribute('aria-hidden', 'true'); arrow.textContent = '→';
-          const target = document.createElement('span'); target.textContent = `${rule.destIP}:${rule.destPort}`;
-          publicSide.append(publicLabel, publicEndpoint); targetSide.append(targetLabel, target);
-          path.append(publicSide, arrow, targetSide); pathCell.append(path); row.append(pathCell);
-          const protocolCell = document.createElement('td'); protocolCell.className = 'rule-protocol-cell'; protocolCell.textContent = rule.protocol.toUpperCase(); row.append(protocolCell);
-          const actions = document.createElement('td'); actions.className = 'actions-cell';
-          const edit = document.createElement('button'); edit.className = 'action-button'; edit.type = 'button'; edit.textContent = 'Edit'; edit.title = `Edit ${rule.name || `rule ${rule.id}`}`; edit.onclick = () => beginEdit(rule);
-          const toggle = document.createElement('button'); toggle.className = 'action-button'; toggle.type = 'button'; toggle.textContent = rule.enabled ? 'Disable' : 'Enable'; toggle.title = `${rule.enabled ? 'Disable' : 'Enable'} ${rule.name || `rule ${rule.id}`}`; toggle.onclick = () => changeRule(`/api/rules/${rule.id}/enabled`, 'PATCH', { enabled: !rule.enabled });
-          const remove = document.createElement('button'); remove.className = 'action-button remove'; remove.type = 'button'; remove.textContent = 'Remove'; remove.title = `Remove ${rule.name || `rule ${rule.id}`}`; remove.onclick = () => { if (confirm(`Remove ${rule.name || `rule ${rule.id}`}?`)) changeRule(`/api/rules/${rule.id}`, 'DELETE'); };
-          actions.append(edit, toggle, remove); row.append(actions); body.append(row);
-        }
+        allRules = await api('/api/rules');
+        render();
+        await loadHost();
       } catch (error) { message(error.message); }
       finally { refreshingRules = false; }
     }
-    async function changeRule(path, method, body) { try { await api(path, { method, body: body ? JSON.stringify(body) : undefined }); message('Rule changes applied.'); await load(); } catch (error) { message(error.message); } }
+    // Mirrors store.Rule.Matches in Go so the web UI and TUI search alike:
+    // every word must match part of the name, a port, the address or #ID,
+    // or be a keyword (on/up/enabled, off/down/disabled, tcp, udp, real, masked).
+    function matches(rule, query) {
+      const text = `#${rule.id} ${rule.name} :${rule.publicPort} ${rule.destIP}:${rule.destPort} ${rule.protocol}`.toLowerCase();
+      return query.toLowerCase().split(/\s+/).filter(Boolean).every(word => {
+        switch (word) {
+          case 'on': case 'up': case 'enabled': return rule.enabled;
+          case 'off': case 'down': case 'disabled': return !rule.enabled;
+          case 'tcp': case 'udp': return rule.protocol === word || rule.protocol === 'both';
+          case 'real': return rule.keepClientIP;
+          case 'masked': return !rule.keepClientIP;
+          default: return text.includes(word);
+        }
+      });
+    }
+    // render draws the saved rules that match the search box.
+    function render() {
+      const query = search.value.trim();
+      const rows = allRules.filter(rule => matches(rule, query));
+      const body = document.querySelector('#rules'); body.replaceChildren();
+      const empty = document.querySelector('#empty');
+      empty.hidden = rows.length > 0;
+      empty.textContent = allRules.length === 0 ? 'No forwarding rules saved.' : `No rules match "${query}".`;
+      document.querySelector('#search-count').textContent = query ? `${rows.length} of ${allRules.length} rules` : `${allRules.length} rule${allRules.length === 1 ? '' : 's'}`;
+      for (const rule of rows) {
+        const row = document.createElement('tr');
+        const state = document.createElement('span'); state.className = `state${rule.enabled ? '' : ' off'}`; state.textContent = rule.enabled ? 'Enabled' : 'Disabled';
+        const stateCell = document.createElement('td'); stateCell.className = 'rule-state-cell'; stateCell.append(state); row.append(stateCell);
+        const nameCell = document.createElement('td'); nameCell.className = 'rule-name-cell';
+        const name = document.createElement('span'); name.className = 'rule-name'; name.textContent = rule.name || 'Unnamed forward';
+        const id = document.createElement('small'); id.className = 'rule-id'; id.textContent = `Rule #${rule.id}`;
+        nameCell.append(name, id); row.append(nameCell);
+        const pathCell = document.createElement('td'); pathCell.className = 'rule-path-cell';
+        const path = document.createElement('div'); path.className = 'route-flow route';
+        const publicSide = document.createElement('span'); publicSide.className = 'route-endpoint';
+        const publicLabel = document.createElement('small'); publicLabel.textContent = 'Public';
+        const targetSide = document.createElement('span'); targetSide.className = 'route-endpoint';
+        const targetLabel = document.createElement('small'); targetLabel.textContent = 'Target';
+        const publicEndpoint = document.createElement('span'); publicEndpoint.textContent = `:${rule.publicPort}`;
+        const arrow = document.createElement('span'); arrow.className = 'route-arrow'; arrow.setAttribute('aria-hidden', 'true'); arrow.textContent = '→';
+        const target = document.createElement('span'); target.textContent = `${rule.destIP}:${rule.destPort}`;
+        publicSide.append(publicLabel, publicEndpoint); targetSide.append(targetLabel, target);
+        path.append(publicSide, arrow, targetSide); pathCell.append(path); row.append(pathCell);
+        const protocolCell = document.createElement('td'); protocolCell.className = 'rule-protocol-cell'; protocolCell.textContent = rule.protocol.toUpperCase() + (rule.keepClientIP ? ' · real client IP' : ''); row.append(protocolCell);
+        const actions = document.createElement('td'); actions.className = 'actions-cell';
+        const edit = document.createElement('button'); edit.className = 'action-button'; edit.type = 'button'; edit.textContent = 'Edit'; edit.title = `Edit ${rule.name || `rule ${rule.id}`}`; edit.onclick = () => beginEdit(rule);
+        const toggle = document.createElement('button'); toggle.className = 'action-button'; toggle.type = 'button'; toggle.textContent = rule.enabled ? 'Disable' : 'Enable'; toggle.title = `${rule.enabled ? 'Disable' : 'Enable'} ${rule.name || `rule ${rule.id}`}`; toggle.onclick = () => changeRule(`/api/rules/${rule.id}/enabled`, 'PATCH', { enabled: !rule.enabled }, toggle);
+        const clientIP = document.createElement('button'); clientIP.className = 'action-button'; clientIP.type = 'button'; clientIP.textContent = rule.keepClientIP ? 'Mask client IP' : 'Use real IP'; clientIP.title = rule.keepClientIP ? 'Show the VPS tunnel IP to the server again' : 'Pass the real client IP to the server';
+        clientIP.onclick = () => {
+          if (!rule.keepClientIP && !confirm('Pass the real client IP? The home side needs a return route through the tunnel (see README: Keep the Real Client IP), or this forward stops working.')) return;
+          changeRule(`/api/rules/${rule.id}`, 'PATCH', { name: rule.name, publicPort: rule.publicPort, destIP: rule.destIP, destPort: rule.destPort, protocol: rule.protocol, keepClientIP: !rule.keepClientIP }, clientIP);
+        };
+        const remove = document.createElement('button'); remove.className = 'action-button remove'; remove.type = 'button'; remove.textContent = 'Remove'; remove.title = `Remove ${rule.name || `rule ${rule.id}`}`; remove.onclick = () => { if (confirm(`Remove ${rule.name || `rule ${rule.id}`}?`)) changeRule(`/api/rules/${rule.id}`, 'DELETE'); };
+        actions.append(edit, toggle, clientIP, remove); row.append(actions); body.append(row);
+      }
+    }
+    async function changeRule(path, method, body, button) {
+      if (button) { button.disabled = true; button.textContent = 'Applying…'; }
+      try {
+        const result = await api(path, { method, body: body ? JSON.stringify(body) : undefined });
+        message(result?.notice ? `Rule changes applied. ${result.notice}.` : 'Rule changes applied.');
+        await load();
+      } catch (error) { message(error.message); }
+    }
     document.querySelector('#login-form').addEventListener('submit', async event => { event.preventDefault(); token = document.querySelector('#token').value.trim(); try { sessionStorage.setItem('iptable-ui-token', token); } catch (_) {} try { await api('/api/rules'); login.hidden = true; startRulePolling(); await load(); } catch (error) { document.querySelector('#login-error').textContent = error.message; document.querySelector('#login-error').style.display = 'block'; } });
     function beginEdit(rule) {
       editingRuleId = rule.id;
@@ -262,6 +363,7 @@
       document.querySelector('#dest-port').value = rule.destPort;
       document.querySelector('#dest-ip').value = rule.destIP;
       document.querySelector('#protocol').value = rule.protocol;
+      document.querySelector('#keep-client-ip').value = String(rule.keepClientIP);
       document.querySelector('#save-rule').textContent = 'Update and apply';
       document.querySelector('#cancel-edit').hidden = false;
       document.querySelector('#name').focus();
@@ -279,7 +381,7 @@
       const form = new FormData(event.currentTarget);
       const publicPort = Number(form.get('publicPort'));
       const destPort = Number(form.get('destPort')) || publicPort;
-      const rule = { name: form.get('name'), publicPort, destIP: form.get('destIP'), destPort, protocol: form.get('protocol') };
+      const rule = { name: form.get('name'), publicPort, destIP: form.get('destIP'), destPort, protocol: form.get('protocol'), keepClientIP: form.get('keepClientIP') === 'true' };
       try {
         if (editingRuleId === null) await api('/api/rules', { method: 'POST', body: JSON.stringify(rule) });
         else await api(`/api/rules/${editingRuleId}`, { method: 'PATCH', body: JSON.stringify(rule) });
@@ -287,7 +389,13 @@
       } catch (error) { message(error.message); }
     });
     document.querySelector('#refresh').onclick = load;
-    document.querySelector('#reconcile').onclick = () => changeRule('/api/reconcile', 'POST');
+    document.querySelector('#reconcile').onclick = async event => {
+      const button = event.currentTarget;
+      button.disabled = true; button.textContent = 'Re-applying…';
+      try { await api('/api/reconcile', { method: 'POST' }); message('Saved rules re-applied to the firewall.'); await load(); }
+      catch (error) { message(error.message); }
+      finally { button.disabled = false; button.textContent = 'Re-apply rules'; }
+    };
     document.querySelector('#wg-form').addEventListener('submit', async event => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);

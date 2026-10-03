@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -80,5 +81,73 @@ func TestImportMissingIsIdempotentAndPreservesDatabaseState(t *testing.T) {
 	}
 	if len(rules) != 2 || rules[0].Enabled || rules[0].Name != "database rule" {
 		t.Fatalf("import overwrote existing database state: %+v", rules)
+	}
+}
+
+func TestKeepClientIPIsStoredAndOldDatabasesMigrate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE rules (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', public_port INTEGER NOT NULL, dest_ip TEXT NOT NULL, dest_port INTEGER NOT NULL, protocol TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(public_port, protocol));
+		INSERT INTO rules(name, public_port, dest_ip, dest_port, protocol, enabled, created_at, updated_at) VALUES('old', 80, '10.0.0.2', 80, 'tcp', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	database, err := Open(path)
+	if err != nil {
+		t.Fatalf("an old database should migrate: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	added, err := database.Add(ctx, Rule{PublicPort: 25565, DestIP: "10.0.0.3", DestPort: 25565, Protocol: "both", KeepClientIP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := database.List(ctx)
+	if err != nil || len(rules) != 2 || rules[0].KeepClientIP || !rules[1].KeepClientIP {
+		t.Fatalf("unexpected rules after migration: %+v, %v", rules, err)
+	}
+	added.KeepClientIP = false
+	if updated, err := database.Update(ctx, added); err != nil || updated.KeepClientIP {
+		t.Fatalf("update should clear keepClientIP: %+v, %v", updated, err)
+	}
+}
+
+func TestRuleMatchesSearch(t *testing.T) {
+	minecraft := Rule{ID: 3, Name: "Minecraft", PublicPort: 25565, DestIP: "10.66.0.2", DestPort: 25565, Protocol: "both", Enabled: true, KeepClientIP: true}
+	web := Rule{ID: 12, Name: "Website", PublicPort: 8080, DestIP: "192.168.1.20", DestPort: 80, Protocol: "tcp"}
+	tests := []struct {
+		query          string
+		minecraft, web bool
+	}{
+		{"", true, true},
+		{"25565", true, false},
+		{"MINE", true, false},
+		{"10.66", true, false},
+		{"192.168.1.20:80", false, true},
+		{"#12", false, true},
+		{":80", false, true},
+		{"on", true, false},
+		{"up", true, false},
+		{"off", false, true},
+		{"udp", true, false}, // "both" carries UDP
+		{"tcp", true, true},
+		{"real", true, false},
+		{"masked", false, true},
+		{"tcp off", false, true},
+		{"udp off", false, false},
+		{"website 8080", false, true},
+		{"nothing-like-this", false, false},
+	}
+	for _, test := range tests {
+		if got := minecraft.Matches(test.query); got != test.minecraft {
+			t.Errorf("minecraft.Matches(%q) = %v", test.query, got)
+		}
+		if got := web.Matches(test.query); got != test.web {
+			t.Errorf("web.Matches(%q) = %v", test.query, got)
+		}
 	}
 }

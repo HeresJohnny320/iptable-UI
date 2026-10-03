@@ -4,15 +4,19 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
+	"github.com/HeresJohnny320/iptable-ui/internal/system"
 	wgsetup "github.com/HeresJohnny320/iptable-ui/internal/wireguard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
+	"github.com/muesli/termenv"
 )
 
 var (
@@ -39,6 +43,7 @@ const (
 	addScreen
 	wireGuardScreen
 	wireGuardResultScreen
+	helpScreen
 )
 
 type WebControl interface {
@@ -53,24 +58,62 @@ type WireGuardSetup interface {
 	Configure(context.Context, wgsetup.SetupRequest) (wgsetup.SetupResult, error)
 }
 
+type SystemControl interface {
+	Status(context.Context) system.Status
+	SetForwarding(context.Context, bool) error
+	SetBootRestore(context.Context, bool) error
+}
+
 type model struct {
-	service       app.Service
-	webControl    WebControl
-	wgSetup       WireGuardSetup
-	rules         []store.Rule
-	cursor        int
-	selectedID    int64
-	listOffset    int
-	activeScreen  screen
-	fields        []string
-	focus         int
-	message       string
-	confirmDelete bool
-	wgResult      wgsetup.SetupResult
-	wgInterface   string
-	editingID     int64
-	width         int
-	height        int
+	service      app.Service
+	webControl   WebControl
+	wgSetup      WireGuardSetup
+	system       SystemControl
+	systemStatus *system.Status
+	// rules is what the list shows: allRules filtered by query.
+	rules    []store.Rule
+	allRules []store.Rule
+	query    string
+	// searching is true while the search line has keyboard focus.
+	searching    bool
+	cursor       int
+	selectedID   int64
+	listOffset   int
+	activeScreen screen
+	fields       []string
+	focus        int
+	message      string
+	confirm      *pendingAction
+	wgResult     wgsetup.SetupResult
+	wgInterface  string
+	editingID    int64
+	scroll       int
+	// allowWhiptail shows the U key; switchToWhiptail is set when it is pressed.
+	allowWhiptail    bool
+	switchToWhiptail bool
+	// applying counts changes shown on screen before the firewall finished
+	// applying them; refreshes wait so they do not flash the old state.
+	applying int
+	width    int
+	height   int
+}
+
+// pendingAction is a change that waits for the user to press y. Its action
+// may return a notice to show after the success message.
+type pendingAction struct {
+	success string
+	action  func(context.Context) (string, error)
+}
+
+const (
+	clientIPMasked = "masked"
+	clientIPReal   = "real"
+)
+
+// addPickers are the add-form fields chosen with LEFT/RIGHT instead of typed.
+var addPickers = map[int][]string{
+	4: {"both", "tcp", "udp"},
+	5: {clientIPMasked, clientIPReal},
 }
 
 type rulesLoaded struct {
@@ -81,7 +124,14 @@ type rulesLoaded struct {
 type actionFinished struct {
 	message string
 	err     error
+	// warnForwarding appends a hint when IPv4 forwarding is off, because the
+	// rule cannot pass traffic until it is enabled.
+	warnForwarding bool
+	// optimistic marks a change that was already drawn on screen.
+	optimistic bool
 }
+
+type systemLoaded system.Status
 
 type wireGuardSetupFinished struct {
 	result wgsetup.SetupResult
@@ -90,14 +140,39 @@ type wireGuardSetupFinished struct {
 
 type rulesRefreshTick time.Time
 
-func Run(service app.Service, webControl WebControl, setup WireGuardSetup) error {
-	program := tea.NewProgram(model{service: service, webControl: webControl, wgSetup: setup}, tea.WithAltScreen())
-	_, err := program.Run()
-	return err
+// Run shows the TUI until the user quits. It reports whether the user asked
+// to switch to whiptail mode instead.
+func Run(service app.Service, webControl WebControl, setup WireGuardSetup, host SystemControl, allowWhiptail bool) (bool, error) {
+	lipgloss.SetColorProfile(colorProfile(lipgloss.ColorProfile(), os.Getenv, term.IsTerminal(os.Stdout.Fd())))
+	program := tea.NewProgram(model{service: service, webControl: webControl, wgSetup: setup, system: host, allowWhiptail: allowWhiptail}, tea.WithAltScreen())
+	final, err := program.Run()
+	if err != nil {
+		return false, err
+	}
+	finished, _ := final.(model)
+	return finished.switchToWhiptail, nil
+}
+
+// colorProfile upgrades terminals that do not advertise color support. PuTTY,
+// plain xterm and many SSH clients set TERM=xterm, which termenv treats as
+// monochrome even though they all render 256 colors. NO_COLOR and TERM=dumb
+// still turn colors off.
+func colorProfile(detected termenv.Profile, getenv func(string) string, tty bool) termenv.Profile {
+	if getenv("NO_COLOR") != "" {
+		return termenv.Ascii
+	}
+	if detected != termenv.Ascii || !tty {
+		return detected
+	}
+	switch strings.ToLower(getenv("TERM")) {
+	case "", "dumb":
+		return termenv.Ascii
+	}
+	return termenv.ANSI256
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.loadRules, scheduleRulesRefresh())
+	return tea.Batch(m.loadRules, m.loadSystem, scheduleRulesRefresh())
 }
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -109,10 +184,13 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rulesRefreshTick:
 		if m.activeScreen == listScreen {
-			return m, tea.Batch(m.loadRules, scheduleRulesRefresh())
+			return m, tea.Batch(m.loadRules, m.loadSystem, scheduleRulesRefresh())
 		}
 		return m, scheduleRulesRefresh()
 	case rulesLoaded:
+		if m.applying > 0 {
+			return m, nil
+		}
 		if message.err != nil {
 			m.message = "Rule list refresh failed: " + message.err.Error()
 			return m, nil
@@ -123,17 +201,27 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.keepCursorVisible()
 		return m, nil
+	case systemLoaded:
+		status := system.Status(message)
+		m.systemStatus = &status
+		return m, nil
 	case actionFinished:
+		if message.optimistic && m.applying > 0 {
+			m.applying--
+		}
 		if message.err != nil {
 			m.message = message.err.Error()
-			return m, nil
+			return m, tea.Batch(m.loadRules, m.loadSystem)
 		}
 		m.message = message.message
+		if message.warnForwarding && m.systemStatus != nil && !m.systemStatus.Forwarding {
+			m.message += ". IPv4 forwarding is OFF, so traffic will not pass; press F to enable it."
+		}
 		if message.message == "Rule updated and applied" {
 			m.activeScreen = listScreen
 			m.editingID = 0
 		}
-		return m, m.loadRules
+		return m, tea.Batch(m.loadRules, m.loadSystem)
 	case wireGuardSetupFinished:
 		if message.err != nil {
 			m.message = message.err.Error()
@@ -142,6 +230,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.wgResult = message.result
 		m.wgInterface = m.fields[0]
 		m.activeScreen = wireGuardResultScreen
+		m.scroll = 0
 		return m, nil
 	case tea.KeyMsg:
 		if m.activeScreen == addScreen {
@@ -150,11 +239,8 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeScreen == wireGuardScreen {
 			return m.updateWireGuard(message)
 		}
-		if m.activeScreen == wireGuardResultScreen {
-			if message.Type == tea.KeyEsc || message.String() == "enter" || message.String() == "q" {
-				m.activeScreen = listScreen
-			}
-			return m, nil
+		if m.activeScreen == wireGuardResultScreen || m.activeScreen == helpScreen {
+			return m.updateResult(message)
 		}
 		return m.updateList(message)
 	}
@@ -162,6 +248,28 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.confirm != nil {
+		pending := m.confirm
+		m.confirm = nil
+		if key.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		if keyName(key) == "y" {
+			return m, func() tea.Msg {
+				notice, err := pending.action(context.Background())
+				return actionFinished{message: withNotice(pending.success, notice), err: err}
+			}
+		}
+		m.message = "Cancelled."
+		return m, nil
+	}
+	if m.searching {
+		if handled, quit := m.updateSearch(key); quit {
+			return m, tea.Quit
+		} else if handled {
+			return m, nil
+		}
+	}
 	if key.Type == tea.KeyUp {
 		if m.cursor > 0 {
 			m.selectRule(m.cursor - 1)
@@ -176,7 +284,7 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.keepCursorVisible()
 		return m, nil
 	}
-	switch key.String() {
+	switch keyName(key) {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "k":
@@ -190,7 +298,7 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.keepCursorVisible()
 	case "r":
-		return m, m.perform("Enabled rules restored", m.service.Reconcile)
+		return m, m.perform("Saved rules re-applied to the firewall", m.service.Reconcile)
 	case "w":
 		if m.webControl == nil {
 			m.message = "Web UI control is unavailable."
@@ -204,6 +312,25 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.message = "Web UI is OFF. The session token remains valid only for this process."
 		}
+	case "/":
+		m.searching = true
+		m.message = ""
+	case "esc":
+		if m.query != "" {
+			m.query = ""
+			m.filterRules()
+			m.message = "Search cleared."
+		}
+	case "?", "h":
+		m.activeScreen = helpScreen
+		m.scroll = 0
+	case "u":
+		if !m.allowWhiptail {
+			m.message = "whiptail is not installed (Debian/Ubuntu: apt install whiptail; Fedora: dnf install newt)."
+			break
+		}
+		m.switchToWhiptail = true
+		return m, tea.Quit
 	case "g":
 		m.activeScreen = wireGuardScreen
 		m.fields = []string{"wg0", "10.66.0.1/24", "10.66.0.2", "192.168.0.0/24", "", "vpn.example.net:51820", "51820"}
@@ -212,7 +339,7 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.activeScreen = addScreen
 		m.editingID = 0
-		m.fields = []string{"", "", "", "", "both"}
+		m.fields = []string{"", "", "", "", "both", clientIPMasked}
 		m.focus = 0
 		m.message = "Tab moves between fields. Enter saves on the final field."
 	case "e":
@@ -220,33 +347,90 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			rule := m.rules[m.cursor]
 			m.activeScreen = addScreen
 			m.editingID = rule.ID
-			m.fields = []string{rule.Name, fmt.Sprint(rule.PublicPort), rule.DestIP, fmt.Sprint(rule.DestPort), rule.Protocol}
+			clientIP := clientIPMasked
+			if rule.KeepClientIP {
+				clientIP = clientIPReal
+			}
+			m.fields = []string{rule.Name, fmt.Sprint(rule.PublicPort), rule.DestIP, fmt.Sprint(rule.DestPort), rule.Protocol, clientIP}
 			m.focus = 0
 			m.message = "Editing selected rule. Enter saves the change."
 		}
 	case "t":
 		if len(m.rules) > 0 {
 			rule := m.rules[m.cursor]
-			return m, m.perform("Rule state changed", func(ctx context.Context) error {
-				return m.service.SetEnabled(ctx, rule.ID, !rule.Enabled)
-			})
+			changed := rule
+			changed.Enabled = !rule.Enabled
+			m.showApplying(changed)
+			return m, func() tea.Msg {
+				notice, err := m.service.SetEnabled(context.Background(), rule.ID, changed.Enabled)
+				message := fmt.Sprintf("Rule #%d disabled", rule.ID)
+				if changed.Enabled {
+					message = fmt.Sprintf("Rule #%d enabled", rule.ID)
+				}
+				return actionFinished{message: withNotice(message, notice), err: err, warnForwarding: changed.Enabled, optimistic: true}
+			}
+		}
+	case "i":
+		if len(m.rules) > 0 {
+			rule := m.rules[m.cursor]
+			changed := rule
+			changed.KeepClientIP = !rule.KeepClientIP
+			if changed.KeepClientIP {
+				m.confirm = &pendingAction{success: fmt.Sprintf("Rule #%d now passes the real client IP", rule.ID), action: func(ctx context.Context) (string, error) {
+					_, err := m.service.Update(ctx, changed)
+					return "Replies must route back through the tunnel; see README: Keep the Real Client IP", err
+				}}
+				m.message = fmt.Sprintf("Pass the real client IP for rule #%d? The home side needs a return route through the tunnel or the forward stops working. Press y to confirm, any other key to cancel.", rule.ID)
+				break
+			}
+			m.showApplying(changed)
+			return m, func() tea.Msg {
+				_, err := m.service.Update(context.Background(), changed)
+				return actionFinished{message: fmt.Sprintf("Rule #%d masks the client IP again", rule.ID), err: err, optimistic: true}
+			}
 		}
 	case "d":
 		if len(m.rules) > 0 {
-			m.confirmDelete = true
-			m.message = "Remove selected rule? Press y to confirm, n to cancel."
-		}
-	case "y":
-		if m.confirmDelete && len(m.rules) > 0 {
 			rule := m.rules[m.cursor]
-			m.confirmDelete = false
-			return m, m.perform("Rule removed", func(ctx context.Context) error { return m.service.Delete(ctx, rule.ID) })
+			m.confirm = &pendingAction{success: fmt.Sprintf("Rule #%d removed", rule.ID), action: func(ctx context.Context) (string, error) { return m.service.Delete(ctx, rule.ID) }}
+			m.message = fmt.Sprintf("Remove rule #%d? Press y to confirm, any other key to cancel.", rule.ID)
 		}
-	case "n", "esc":
-		if m.confirmDelete {
-			m.confirmDelete = false
-			m.message = "Removal cancelled."
+	case "f":
+		if m.system == nil || m.systemStatus == nil {
+			m.message = "Host settings are unavailable."
+			break
 		}
+		if m.systemStatus.Forwarding {
+			m.confirm = &pendingAction{success: "IPv4 forwarding disabled", action: func(ctx context.Context) (string, error) { return "", m.system.SetForwarding(ctx, false) }}
+			m.message = "Disable IPv4 forwarding? Every forward stops passing traffic. Press y to confirm, any other key to cancel."
+			break
+		}
+		return m, m.perform("IPv4 forwarding enabled and saved for reboots", func(ctx context.Context) error { return m.system.SetForwarding(ctx, true) })
+	case "b":
+		if m.system == nil || m.systemStatus == nil {
+			m.message = "Host settings are unavailable."
+			break
+		}
+		if m.systemStatus.BootRestore {
+			return m, m.perform("Apply on boot is OFF: after a reboot, forwards stay down until you open iptable-ui", func(ctx context.Context) error { return m.system.SetBootRestore(ctx, false) })
+		}
+		return m, m.perform("Apply on boot is ON: your saved rules come back automatically after a reboot", func(ctx context.Context) error { return m.system.SetBootRestore(ctx, true) })
+	}
+	return m, nil
+}
+
+func (m model) updateResult(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch keyName(key) {
+	case "esc", "enter", "q", "?", "h":
+		m.activeScreen = listScreen
+	case "up", "k":
+		m.scroll = max(0, m.scroll-1)
+	case "down", "j":
+		m.scroll = min(m.maxResultScroll(), m.scroll+1)
+	case "pgup":
+		m.scroll = max(0, m.scroll-max(1, m.heightLimit()/2))
+	case "pgdown", " ":
+		m.scroll = min(m.maxResultScroll(), m.scroll+max(1, m.heightLimit()/2))
 	}
 	return m, nil
 }
@@ -275,7 +459,7 @@ func (m model) updateWireGuard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			result, err := m.wgSetup.Configure(context.Background(), request)
 			return wireGuardSetupFinished{result: result, err: err}
 		}
-	case tea.KeyBackspace, tea.KeyDelete:
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
 		if len(m.fields[m.focus]) > 0 {
 			m.fields[m.focus] = m.fields[m.focus][:len(m.fields[m.focus])-1]
 		}
@@ -296,22 +480,21 @@ func (m model) updateAdd(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = (m.focus + 1) % len(m.fields)
 	case tea.KeyShiftTab, tea.KeyUp:
 		m.focus = (m.focus - 1 + len(m.fields)) % len(m.fields)
-	case tea.KeyLeft, tea.KeyRight:
-		if m.focus == 4 {
-			protocols := []string{"both", "tcp", "udp"}
+	case tea.KeyLeft, tea.KeyRight, tea.KeySpace:
+		if choices, ok := addPickers[m.focus]; ok {
 			current := 0
-			for index, protocol := range protocols {
-				if m.fields[4] == protocol {
+			for index, choice := range choices {
+				if m.fields[m.focus] == choice {
 					current = index
 					break
 				}
 			}
-			if key.Type == tea.KeyRight {
-				current = (current + 1) % len(protocols)
+			if key.Type == tea.KeyLeft {
+				current = (current - 1 + len(choices)) % len(choices)
 			} else {
-				current = (current - 1 + len(protocols)) % len(protocols)
+				current = (current + 1) % len(choices)
 			}
-			m.fields[4] = protocols[current]
+			m.fields[m.focus] = choices[current]
 		}
 	case tea.KeyEnter:
 		if m.focus < len(m.fields)-1 {
@@ -327,17 +510,19 @@ func (m model) updateAdd(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.editingID != 0 {
 				rule.ID = m.editingID
 				_, err := m.service.Update(context.Background(), rule)
-				return actionFinished{message: "Rule updated and applied", err: err}
+				return actionFinished{message: "Rule updated and applied", err: err, warnForwarding: true}
 			}
 			_, err := m.service.Add(context.Background(), rule)
-			return actionFinished{message: "Rule saved and applied", err: err}
+			return actionFinished{message: "Rule saved and applied", err: err, warnForwarding: true}
 		}
-	case tea.KeyBackspace, tea.KeyDelete:
-		if len(m.fields[m.focus]) > 0 {
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if _, picker := addPickers[m.focus]; !picker && len(m.fields[m.focus]) > 0 {
 			m.fields[m.focus] = m.fields[m.focus][:len(m.fields[m.focus])-1]
 		}
 	case tea.KeyRunes:
-		m.fields[m.focus] += string(key.Runes)
+		if _, picker := addPickers[m.focus]; !picker {
+			m.fields[m.focus] += string(key.Runes)
+		}
 	}
 	return m, nil
 }
@@ -347,16 +532,38 @@ func (m model) loadRules() tea.Msg {
 	return rulesLoaded{rules: rules, err: err}
 }
 
+func (m model) loadSystem() tea.Msg {
+	if m.system == nil {
+		return nil
+	}
+	return systemLoaded(m.system.Status(context.Background()))
+}
+
 func scheduleRulesRefresh() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return rulesRefreshTick(t) })
 }
 
 func (m *model) updateRules(rules []store.Rule) {
+	m.allRules = rules
+	m.filterRules()
+}
+
+// filterRules shows the rules matching the search, keeping the selected rule
+// selected while it still matches.
+func (m *model) filterRules() {
+	if m.allRules == nil {
+		m.allRules = m.rules
+	}
 	selectedID := m.selectedID
 	if selectedID == 0 && m.cursor >= 0 && m.cursor < len(m.rules) {
 		selectedID = m.rules[m.cursor].ID
 	}
-	m.rules = rules
+	m.rules = make([]store.Rule, 0, len(m.allRules))
+	for _, rule := range m.allRules {
+		if rule.Matches(m.query) {
+			m.rules = append(m.rules, rule)
+		}
+	}
 	if len(m.rules) == 0 {
 		m.cursor = 0
 		m.selectedID = 0
@@ -386,6 +593,60 @@ func (m *model) selectRule(index int) {
 	m.selectedID = m.rules[m.cursor].ID
 }
 
+// updateSearch edits the search line. Up and Down are not handled, so the
+// matches can be browsed while typing.
+func (m *model) updateSearch(key tea.KeyMsg) (handled, quit bool) {
+	switch key.Type {
+	case tea.KeyCtrlC:
+		return true, true
+	case tea.KeyUp, tea.KeyDown:
+		return false, false
+	case tea.KeyEnter:
+		m.searching = false
+	case tea.KeyEsc:
+		m.searching = false
+		m.query = ""
+		m.filterRules()
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if runes := []rune(m.query); len(runes) > 0 {
+			m.query = string(runes[:len(runes)-1])
+			m.filterRules()
+		}
+	case tea.KeySpace:
+		m.query += " "
+		m.filterRules()
+	case tea.KeyRunes:
+		m.query += string(key.Runes)
+		m.filterRules()
+	}
+	return true, false
+}
+
+// showApplying draws a rule change right away, before the firewall has
+// finished applying it.
+func (m *model) showApplying(changed store.Rule) {
+	if m.allRules == nil {
+		m.allRules = m.rules
+	}
+	rules := append([]store.Rule(nil), m.allRules...)
+	for index := range rules {
+		if rules[index].ID == changed.ID {
+			rules[index] = changed
+		}
+	}
+	m.allRules = rules
+	m.filterRules()
+	m.applying++
+	m.message = fmt.Sprintf("Applying rule #%d...", changed.ID)
+}
+
+func withNotice(message, notice string) string {
+	if notice == "" {
+		return message
+	}
+	return message + ". " + notice
+}
+
 func (m model) perform(success string, action func(context.Context) error) tea.Cmd {
 	return func() tea.Msg {
 		err := action(context.Background())
@@ -393,206 +654,20 @@ func (m model) perform(success string, action func(context.Context) error) tea.C
 	}
 }
 
-func (m model) View() string {
-	if m.activeScreen == addScreen {
-		return m.addView()
+// keyName lowercases single-letter keys so shortcuts work with Caps Lock or
+// Shift held, as the help bar shows them in capitals.
+func keyName(key tea.KeyMsg) string {
+	if key.Type == tea.KeyRunes && len(key.Runes) == 1 && !key.Alt {
+		return strings.ToLower(string(key.Runes))
 	}
-	if m.activeScreen == wireGuardScreen {
-		return m.wireGuardView()
-	}
-	if m.activeScreen == wireGuardResultScreen {
-		return m.wireGuardResultView()
-	}
-	width := m.contentWidth()
-	brand := lipgloss.JoinHorizontal(lipgloss.Center, brandStyle.Render(" IP TABLE UI "), "  ", sectionStyle.Render("PORT FORWARD MANAGER"))
-	headerLines := []string{brand, mutedStyle.Render("Manage saved forwards and restore the live firewall from SQLite."), mutedStyle.Render("Rule list auto-syncs every second while this menu is open.")}
-	if m.webControl != nil {
-		status := m.webControl.StatusText()
-		if m.webControl.Enabled() {
-			status = enabledStyle.Render(status)
-		} else {
-			status = disabledStyle.Render(status)
-		}
-		headerLines = append(headerLines,
-			lipgloss.JoinHorizontal(lipgloss.Left, labelStyle.Render("WEB  "), status),
-			lipgloss.JoinHorizontal(lipgloss.Left, labelStyle.Render("TOKEN  "), publicStyle.Render(m.webControl.Token())),
-		)
-	}
-	header := lipgloss.NewStyle().Border(panelBorder).BorderForeground(lipgloss.Color("#3B7557")).Padding(0, 1).Width(width - 8).MaxWidth(width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, headerLines...))
-	rows := make([]string, 0, len(m.rules)+1)
-	if len(m.rules) == 0 {
-		rows = append(rows, mutedStyle.Render("No saved forwarding rules yet. Choose Add rule to get started."))
-	}
-	start, end := m.visibleRuleRange()
-	for index := start; index < end; index++ {
-		rule := m.rules[index]
-		marker := "  "
-		if index == m.cursor {
-			marker = selectedStyle.Render("> ")
-		}
-		state := disabledStyle.Render("DISABLED")
-		if rule.Enabled {
-			state = enabledStyle.Render("ENABLED")
-		}
-		label := rule.Name
-		if label == "" {
-			label = "Unnamed forward"
-		}
-		nameStyle := labelStyle
-		if index == m.cursor {
-			nameStyle = selectedStyle
-		}
-		topLine := lipgloss.JoinHorizontal(lipgloss.Left, marker, state, "  ", mutedStyle.Render(fmt.Sprintf("#%d", rule.ID)), "  ", nameStyle.Render(label))
-		routeLine := lipgloss.JoinHorizontal(lipgloss.Left,
-			labelStyle.Render("PUBLIC "), publicStyle.Render(fmt.Sprintf(":%d", rule.PublicPort)),
-			mutedStyle.Render("   ->   TARGET "), addressStyle.Render(rule.DestIP), ":", portStyle.Render(fmt.Sprint(rule.DestPort)),
-		)
-		protocolLine := lipgloss.JoinHorizontal(lipgloss.Left, labelStyle.Render("PROTOCOL "), protocolStyle.Render(strings.ToUpper(rule.Protocol)))
-		content := lipgloss.JoinVertical(lipgloss.Left, topLine, routeLine, protocolLine)
-		borderColor := lipgloss.Color("#394940")
-		if index == m.cursor {
-			borderColor = lipgloss.Color("#58B981")
-		}
-		rows = append(rows, lipgloss.NewStyle().Border(panelBorder).BorderForeground(borderColor).Padding(0, 1).Width(width-16).MaxWidth(width-8).Render(content))
-	}
-	menuTitle := sectionStyle.Render("RULES MENU")
-	menuLines := []string{menuTitle}
-	if len(m.rules) > 0 {
-		menuLines = append(menuLines, mutedStyle.Render(fmt.Sprintf("Showing %d-%d of %d rules", start+1, end, len(m.rules))))
-		if start > 0 {
-			menuLines = append(menuLines, mutedStyle.Render("... more above ..."))
-		}
-	}
-	menu := lipgloss.NewStyle().Border(panelBorder).BorderForeground(lipgloss.Color("#394940")).Padding(0, 1).Width(width - 8).MaxWidth(width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, append(menuLines, rows...)...))
-	if end < len(m.rules) {
-		menu += "\n" + mutedStyle.Render("... more below; use Up/Down to scroll ...")
-	}
-	help := lipgloss.JoinHorizontal(lipgloss.Left, helpKey("UP/DOWN", "select"), "  ", helpKey("A", "add"), "  ", helpKey("E", "edit"))
-	moreHelp := lipgloss.JoinHorizontal(lipgloss.Left, helpKey("T", "toggle"), "  ", helpKey("D", "remove"), "  ", helpKey("R", "restore"))
-	setupHelp := lipgloss.JoinHorizontal(lipgloss.Left, helpKey("G", "WireGuard"), "  ", helpKey("W", "web"), "  ", helpKey("Q", "quit"))
-	sections := []string{header, "", menu, help, moreHelp, setupHelp}
-	if m.message != "" {
-		sections = append(sections, messageStyle.Width(width-8).MaxWidth(width-4).Render(m.message))
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	return key.String()
 }
 
-func (m model) wireGuardView() string {
-	labels := []string{"Interface name", "VPS tunnel address/CIDR", "Home peer tunnel address", "Home LAN CIDR", "Home peer public key", "VPS public endpoint", "Listen port"}
-	fields := make([]string, 0, len(labels)*2)
-	fields = append(fields, brandStyle.Render(" WIREGUARD SETUP "), mutedStyle.Render("Create a protected VPS config and peer template."))
-	for index, label := range labels {
-		marker := "  "
-		valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#DDE7DF"))
-		if index == m.focus {
-			marker = selectedStyle.Render("> ")
-			valueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C96D")).Bold(true)
-		}
-		fields = append(fields, marker+labelStyle.Render(label), valueStyle.Render("  "+displayField(m.fields[index], index == m.focus)))
+func onOff(on bool, onText, offText string) string {
+	if on {
+		return enabledStyle.Render(onText)
 	}
-	fields = append(fields, mutedStyle.Render("On home peer: umask 077; wg genkey | tee privatekey | wg pubkey > publickey"))
-	fields = append(fields, mutedStyle.Render("Paste its public key above. Existing config files are never overwritten."))
-	fields = append(fields, mutedStyle.Render("Tunnel activation remains a separate manual step."))
-	formHelp := lipgloss.JoinHorizontal(lipgloss.Left, helpKey("TAB", "move field"), "  ", helpKey("ENTER", "continue / create"))
-	sections := []string{lipgloss.NewStyle().Border(panelBorder).BorderForeground(lipgloss.Color("#3B7557")).Padding(0, 1).Width(m.contentWidth() - 8).MaxWidth(m.contentWidth() - 4).Render(lipgloss.JoinVertical(lipgloss.Left, fields...)), formHelp, helpKey("ESC", "back")}
-	if m.message != "" {
-		sections = append(sections, messageStyle.Width(m.contentWidth()-8).MaxWidth(m.contentWidth()-4).Render(m.message))
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
-}
-
-func (m model) wireGuardResultView() string {
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		brandStyle.Render(" WIREGUARD CONFIG CREATED "),
-		labelStyle.Render("VPS CONFIG"), addressStyle.Render(m.wgResult.ConfigPath),
-		labelStyle.Render("VPS PUBLIC KEY"), publicStyle.Render(m.wgResult.ServerPublicKey),
-		labelStyle.Render("HOME PEER TEMPLATE (set its private key)"), protocolStyle.Render(m.wgResult.PeerConfig),
-		mutedStyle.Render("Review the config before activation."),
-		selectedStyle.Render("sudo wg-quick up "+m.wgInterface),
-		helpKey("ENTER", "return"),
-	)
-	return lipgloss.NewStyle().Border(panelBorder).BorderForeground(lipgloss.Color("#3B7557")).Padding(0, 1).Width(m.contentWidth() - 8).MaxWidth(m.contentWidth() - 4).Render(content)
-}
-
-func (m model) addView() string {
-	labels := []string{"Label (optional)", "Public port", "Destination IPv4", "Destination port (blank = public)", "Protocol (tcp, udp, both)"}
-	fields := make([]string, 0, len(labels)*2+2)
-	if m.editingID != 0 {
-		fields = append(fields, brandStyle.Render(fmt.Sprintf(" EDIT PORT FORWARD #%d ", m.editingID)))
-	} else {
-		fields = append(fields, brandStyle.Render(" ADD PORT FORWARD "))
-	}
-	for index, label := range labels {
-		marker := "  "
-		valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#DDE7DF"))
-		if index == m.focus {
-			marker = selectedStyle.Render("> ")
-			valueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C96D")).Bold(true)
-		}
-		fields = append(fields, marker+labelStyle.Render(label+":"))
-		if index == 4 {
-			fields = append(fields, valueStyle.Render("  < "+strings.ToUpper(m.fields[index])+" >")+"  "+mutedStyle.Render("(LEFT/RIGHT to change)"))
-		} else {
-			fields = append(fields, valueStyle.Render("  "+displayField(m.fields[index], index == m.focus)))
-		}
-	}
-	formHelp := lipgloss.JoinHorizontal(lipgloss.Left, helpKey("TAB", "move field"), "  ", helpKey("ENTER", "next / save"))
-	sections := []string{lipgloss.NewStyle().Border(panelBorder).BorderForeground(lipgloss.Color("#3B7557")).Padding(0, 1).Width(m.contentWidth() - 8).MaxWidth(m.contentWidth() - 4).Render(lipgloss.JoinVertical(lipgloss.Left, fields...)), formHelp, helpKey("ESC", "cancel")}
-	if m.message != "" {
-		sections = append(sections, messageStyle.Width(m.contentWidth()-8).MaxWidth(m.contentWidth()-4).Render(m.message))
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
-}
-
-func (m model) contentWidth() int {
-	if m.width < 1 {
-		return 80
-	}
-	return max(28, m.width)
-}
-
-func (m model) visibleRuleCount() int {
-	if m.height < 1 {
-		return max(1, len(m.rules))
-	}
-	rowHeight := 6
-	if m.width > 0 && m.width < 56 {
-		rowHeight = 8
-	}
-	return max(1, (m.height-15)/rowHeight)
-}
-
-func (m model) visibleRuleRange() (int, int) {
-	count := min(len(m.rules), m.visibleRuleCount())
-	start := min(max(0, m.listOffset), max(0, len(m.rules)-count))
-	return start, start + count
-}
-
-func (m *model) keepCursorVisible() {
-	if len(m.rules) == 0 {
-		m.cursor = 0
-		m.listOffset = 0
-		return
-	}
-	m.cursor = min(max(0, m.cursor), len(m.rules)-1)
-	count := min(len(m.rules), m.visibleRuleCount())
-	if m.cursor < m.listOffset {
-		m.listOffset = m.cursor
-	}
-	if m.cursor >= m.listOffset+count {
-		m.listOffset = m.cursor - count + 1
-	}
-	m.listOffset = min(max(0, m.listOffset), max(0, len(m.rules)-count))
-}
-
-func displayField(value string, focused bool) string {
-	if value == "" {
-		value = "(empty)"
-	}
-	if focused {
-		return value + "_"
-	}
-	return value
+	return disabledStyle.Render(offText)
 }
 
 func helpKey(key, description string) string {
@@ -619,7 +694,7 @@ func parseRule(fields []string) (store.Rule, error) {
 	if protocol != "tcp" && protocol != "udp" && protocol != "both" {
 		return store.Rule{}, fmt.Errorf("protocol must be tcp, udp, or both")
 	}
-	return store.Rule{Name: strings.TrimSpace(fields[0]), PublicPort: publicPort, DestIP: address.String(), DestPort: destPort, Protocol: protocol}, nil
+	return store.Rule{Name: strings.TrimSpace(fields[0]), PublicPort: publicPort, DestIP: address.String(), DestPort: destPort, Protocol: protocol, KeepClientIP: len(fields) > 5 && fields[5] == clientIPReal}, nil
 }
 
 func parseSetup(fields []string) (wgsetup.SetupRequest, error) {

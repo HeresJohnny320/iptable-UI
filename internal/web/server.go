@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
+	"github.com/HeresJohnny320/iptable-ui/internal/system"
 	wgsetup "github.com/HeresJohnny320/iptable-ui/internal/wireguard"
 )
 
@@ -22,8 +23,8 @@ type service interface {
 	List(context.Context) ([]store.Rule, error)
 	Add(context.Context, store.Rule) (store.Rule, error)
 	Update(context.Context, store.Rule) (store.Rule, error)
-	SetEnabled(context.Context, int64, bool) error
-	Delete(context.Context, int64) error
+	SetEnabled(context.Context, int64, bool) (string, error)
+	Delete(context.Context, int64) (string, error)
 	Reconcile(context.Context) error
 }
 
@@ -33,7 +34,13 @@ type WireGuardSetup interface {
 	UpdateExisting(context.Context, wgsetup.EditConfigRequest) (wgsetup.EditConfigResult, error)
 }
 
-func Handler(token string, rules service, setup WireGuardSetup) http.Handler {
+type SystemControl interface {
+	Status(context.Context) system.Status
+	SetForwarding(context.Context, bool) error
+	SetBootRestore(context.Context, bool) error
+}
+
+func Handler(token string, rules service, setup WireGuardSetup, host SystemControl) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -45,13 +52,14 @@ func Handler(token string, rules service, setup WireGuardSetup) http.Handler {
 		}
 		w.Write(content)
 	})
-	mux.Handle("/api/", authenticate(token, api{service: rules, setup: setup}))
+	mux.Handle("/api/", authenticate(token, api{service: rules, setup: setup, system: host}))
 	return securityHeaders(mux)
 }
 
 type api struct {
 	service service
 	setup   WireGuardSetup
+	system  SystemControl
 }
 
 func (a api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +134,8 @@ func (a api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, result)
 	case strings.HasPrefix(r.URL.Path, "/api/rules/"):
 		a.ruleAction(w, r)
+	case r.URL.Path == "/api/system" || strings.HasPrefix(r.URL.Path, "/api/system/"):
+		a.systemAction(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -142,8 +152,9 @@ func (a api) ruleAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("invalid rule id"))
 		return
 	}
+	notice := ""
 	if r.Method == http.MethodDelete && len(parts) == 1 {
-		err = a.service.Delete(r.Context(), id)
+		notice, err = a.service.Delete(r.Context(), id)
 	} else if r.Method == http.MethodPatch && len(parts) == 1 {
 		var rule store.Rule
 		if err = decodeJSON(w, r, &rule); err == nil {
@@ -158,7 +169,7 @@ func (a api) ruleAction(w http.ResponseWriter, r *http.Request) {
 			if body.Enabled == nil {
 				err = errors.New("enabled is required")
 			} else {
-				err = a.service.SetEnabled(r.Context(), id, *body.Enabled)
+				notice, err = a.service.SetEnabled(r.Context(), id, *body.Enabled)
 			}
 		}
 	} else {
@@ -169,7 +180,43 @@ func (a api) ruleAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]string{"notice": notice})
+}
+
+func (a api) systemAction(w http.ResponseWriter, r *http.Request) {
+	if a.system == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("host settings are unavailable"))
+		return
+	}
+	var apply func(context.Context, bool) error
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/api/system":
+		writeJSON(w, http.StatusOK, a.system.Status(r.Context()))
+		return
+	case r.Method == http.MethodPut && r.URL.Path == "/api/system/forwarding":
+		apply = a.system.SetForwarding
+	case r.Method == http.MethodPut && r.URL.Path == "/api/system/boot-restore":
+		apply = a.system.SetBootRestore
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, errors.New("enabled is required"))
+		return
+	}
+	if err := apply(r.Context(), *body.Enabled); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.system.Status(r.Context()))
 }
 
 func authenticate(token string, next http.Handler) http.Handler {
