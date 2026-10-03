@@ -12,16 +12,20 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
+	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/firewall"
 	"github.com/HeresJohnny320/iptable-ui/internal/packages"
 	"github.com/HeresJohnny320/iptable-ui/internal/setupwizard"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
 	"github.com/HeresJohnny320/iptable-ui/internal/system"
+	"github.com/HeresJohnny320/iptable-ui/internal/traffic"
 	"github.com/HeresJohnny320/iptable-ui/internal/tui"
 	"github.com/HeresJohnny320/iptable-ui/internal/web"
 	"github.com/HeresJohnny320/iptable-ui/internal/whiptail"
@@ -41,7 +45,10 @@ type options struct {
 	noWizard   bool
 	webEnabled bool
 	webAddress string
-	whiptail   bool
+	// webAddressSet is true when --web-address was given, which overrides
+	// the port saved in the database.
+	webAddressSet bool
+	whiptail      bool
 }
 
 func main() {
@@ -176,7 +183,33 @@ func run(args []string) error {
 		return err
 	}
 	defer closeStore()
+	// Back up before anything below (importing, combining TCP+UDP pairs)
+	// changes the database, so those changes can be undone.
+	var backups *backup.Manager
+	if command == "tui" {
+		backups = &backup.Manager{
+			Store: database,
+			Dir:   filepath.Join(filepath.Dir(config.database), "db-backups"),
+			SaveFolder: func(dir string) error {
+				return database.SetSetting(context.Background(), backup.FolderSetting, dir)
+			},
+			Apply: func(ctx context.Context, rules []store.Rule, settings map[string]string) error {
+				if err := database.ReplaceAll(ctx, rules, settings); err != nil {
+					return err
+				}
+				return service.Reconcile(ctx)
+			},
+		}
+		if err := useBackupFolder(database, backups); err != nil {
+			fmt.Fprintln(os.Stderr, "WARNING:", err)
+		}
+		fmt.Println("Database backups:", backups.Folder())
+		if _, _, err := backups.Create(context.Background(), backup.Startup); err != nil {
+			fmt.Fprintln(os.Stderr, "WARNING: could not back up the database:", err)
+		}
+	}
 	var discovered []firewall.ExistingRule
+	needsReapply := false
 	if os.Geteuid() == 0 && config.publicIF != "" {
 		discovered, err = manager.Discover(context.Background())
 		if err != nil {
@@ -186,12 +219,20 @@ func run(args []string) error {
 		for _, existing := range discovered {
 			foundRules = append(foundRules, existing.Rule)
 		}
-		imported, importErr := database.ImportMissing(context.Background(), foundRules)
+		imported, importErr := database.ImportMissing(context.Background(), store.CombineProtocols(foundRules))
 		if importErr != nil {
 			return importErr
 		}
 		if imported > 0 {
 			fmt.Fprintf(os.Stderr, "Imported %d existing iptables rule(s) into the database.\n", imported)
+		}
+		merged, mergeErr := database.MergeProtocolPairs(context.Background())
+		if mergeErr != nil {
+			return mergeErr
+		}
+		if merged > 0 {
+			fmt.Fprintf(os.Stderr, "Combined %d matching TCP and UDP rule pair(s) into single TCP+UDP rules.\n", merged)
+			needsReapply = true
 		}
 	}
 	// Detect the VPN interface after importing, so rules adopted from other
@@ -242,6 +283,11 @@ func run(args []string) error {
 	if err := migrateLegacyRules(context.Background(), service, manager, discovered); err != nil {
 		return err
 	}
+	if needsReapply {
+		if err := service.Reconcile(context.Background()); err != nil {
+			return err
+		}
+	}
 	token, err := newToken()
 	if err != nil {
 		return fmt.Errorf("generate web session token: %w", err)
@@ -262,25 +308,46 @@ func run(args []string) error {
 	} else if changed {
 		fmt.Fprintln(os.Stderr, "Updated the boot restore unit to match this run's binary and interfaces.")
 	}
+	service.BeforeDeleteAll = func(ctx context.Context) error {
+		_, _, err := backups.Create(ctx, backup.PreClear)
+		return err
+	}
+	backupContext, stopBackups := context.WithCancel(context.Background())
+	defer stopBackups()
+	go backups.Run(backupContext, nil)
+	monitor := &traffic.Monitor{Runner: firewall.ExecRunner{}, Adapters: func() []string { return []string{config.publicIF, config.wgIF} }}
+	go monitor.Run(backupContext)
 	setup := wgsetup.SetupManager{ConfigDir: "/etc/wireguard"}
-	webRuntime := web.NewRuntime(token, config.webAddress, service, setup, host)
+	if !config.webAddressSet {
+		config.webAddress = savedWebAddress(database, config.webAddress)
+	}
+	webRuntime := web.NewRuntime(token, config.webAddress, web.Services{Rules: service, WireGuard: setup, Host: host, Backups: backups, Settings: database, Traffic: monitor})
+	webRuntime.SetLinkHost(interfaceIPv4(config.publicIF))
+	webRuntime.OnPortChange(func(port int) error {
+		return database.SetSetting(context.Background(), webPortSetting, strconv.Itoa(port))
+	})
 	if config.webEnabled {
 		if _, err := webRuntime.Toggle(); err != nil {
 			return err
 		}
 	}
-	fmt.Printf("Temporary web token (valid only for this run): %s\n", token)
-	fmt.Println("Web UI:", webRuntime.StatusText())
+	// The IP and token are masked on screen (screenshots, screen sharing);
+	// the link still opens the full address, and the TUI can copy or show it.
+	fmt.Printf("Temporary web token (valid only for this run): %s\n", web.MaskToken(token))
+	fmt.Println("Web UI:", webRuntime.MaskedStatusText())
+	if webRuntime.Enabled() {
+		fmt.Println("Open it signed in:", terminalLink(webRuntime.SignInURL(), web.MaskURL(webRuntime.URL())), " (in the TUI: C copies the link, V shows it)")
+	}
 	if isPublicWebBind(config.webAddress) {
 		fmt.Fprintln(os.Stderr, "WARNING: this exposes the admin UI over plain HTTP. Restrict the port with a firewall and use a TLS reverse proxy for untrusted networks.")
 	}
 	defer webRuntime.Close()
-	return runInterface(config.whiptail, service, webRuntime, setup, host)
+	return runInterface(config.whiptail, service, webRuntime, setup, host, backups, monitor, database)
 }
 
 // runInterface shows the full TUI or whiptail menus, switching between them
 // whenever the user asks, until they quit.
-func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Runtime, setup wgsetup.SetupManager, host system.Host) error {
+func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Runtime, setup wgsetup.SetupManager, host system.Host, backups *backup.Manager, monitor *traffic.Monitor, settings *store.Store) error {
 	whiptailPath, findErr := whiptail.Find()
 	if startInWhiptail && findErr != nil {
 		return findErr
@@ -288,7 +355,7 @@ func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Run
 	useWhiptail := startInWhiptail
 	for {
 		if useWhiptail {
-			dialog := whiptail.Whiptail{Path: whiptailPath, Backtitle: "iptable-ui  |  web token " + webRuntime.Token()}
+			dialog := whiptail.Whiptail{Path: whiptailPath, Backtitle: "iptable-ui  |  web token " + web.MaskToken(webRuntime.Token())}
 			switchToTUI, err := whiptail.Run(dialog, service, webRuntime, host)
 			if err != nil || !switchToTUI {
 				return err
@@ -296,7 +363,8 @@ func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Run
 			useWhiptail = false
 			continue
 		}
-		switchToWhiptail, err := tui.Run(service, webRuntime, setup, host, findErr == nil)
+		switchToWhiptail, err := tui.Run(tui.Options{Service: service, Web: webRuntime, WireGuard: setup, Host: host, Backups: backups,
+			Traffic: monitor, Settings: settings, AllowWhiptail: findErr == nil})
 		if err != nil || !switchToWhiptail {
 			return err
 		}
@@ -348,6 +416,7 @@ func parseOptions(command string, args []string) (options, error) {
 	if flags.NArg() > 0 {
 		return options{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
+	flags.Visit(func(set *flag.Flag) { config.webAddressSet = config.webAddressSet || set.Name == "web-address" })
 	if *webOn && *webOff {
 		return options{}, errors.New("--web and --no-web cannot be used together")
 	}
@@ -396,6 +465,63 @@ func detectVPNInterface(config *options, database *store.Store) error {
 	detected := (system.Host{Runner: firewall.ExecRunner{}}).DetectVPNInterface(context.Background(), config.publicIF, destinations)
 	config.wgIF, config.wgReason, config.wgNotFound = detected.Name, detected.Reason, detected.NotFound
 	return nil
+}
+
+const webPortSetting = "web.port"
+
+// terminalLink shows text that opens target when clicked, in terminals that
+// support links (OSC 8); others, and non-terminals, just show the text.
+func terminalLink(target, text string) string {
+	if !term.IsTerminal(os.Stdout.Fd()) || os.Getenv("TERM") == "dumb" {
+		return text
+	}
+	return "\x1b]8;;" + target + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// useBackupFolder points backups at the saved folder, or on first run at
+// ~/iptable-ui-backups of the user who ran sudo (moving any backups from the
+// old location), where they can be downloaded without root.
+func useBackupFolder(database *store.Store, backups *backup.Manager) error {
+	saved, err := database.Setting(context.Background(), backup.FolderSetting)
+	if err != nil {
+		return err
+	}
+	if saved != "" {
+		backups.Dir = saved
+		return nil
+	}
+	return backups.MoveTo(defaultBackupFolder())
+}
+
+func defaultBackupFolder() string {
+	home := ""
+	if name := os.Getenv("SUDO_USER"); name != "" && name != "root" {
+		if account, err := user.Lookup(name); err == nil {
+			home = account.HomeDir
+		}
+	}
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home == "" {
+		home = "/root"
+	}
+	return filepath.Join(home, "iptable-ui-backups")
+}
+
+// savedWebAddress applies the web UI port saved in the database (chosen in
+// the UI) to the default bind address.
+func savedWebAddress(database *store.Store, address string) string {
+	saved, err := database.Setting(context.Background(), webPortSetting)
+	if err != nil || saved == "" {
+		return address
+	}
+	port, err := strconv.Atoi(saved)
+	host, _, splitErr := net.SplitHostPort(address)
+	if err != nil || port < 1 || port > 65535 || splitErr != nil {
+		return address
+	}
+	return net.JoinHostPort(host, saved)
 }
 
 // runSetupWizard installs and configures a VPN interactively.

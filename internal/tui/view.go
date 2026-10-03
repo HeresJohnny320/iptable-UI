@@ -2,10 +2,18 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/HeresJohnny320/iptable-ui/internal/backup"
+	"github.com/HeresJohnny320/iptable-ui/internal/firewall"
+	"github.com/HeresJohnny320/iptable-ui/internal/store"
+	"github.com/HeresJohnny320/iptable-ui/internal/system"
+	"github.com/HeresJohnny320/iptable-ui/internal/traffic"
+	"github.com/HeresJohnny320/iptable-ui/internal/web"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 // Layout sizes are measured from rendered text rather than hard-coded, so
@@ -17,14 +25,6 @@ const (
 	minBoxedWidth   = 50  // below this, rules drop their boxes and use tight one-line rows
 	unknownHeight   = 1 << 20
 	maxMessageLines = 3
-)
-
-var (
-	accentBorder   = lipgloss.Color("#3B7557")
-	quietBorder    = lipgloss.Color("#394940")
-	selectedBorder = lipgloss.Color("#58B981")
-	valueStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#DDE7DF"))
-	focusedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C96D")).Bold(true)
 )
 
 type headerVariant int
@@ -58,8 +58,10 @@ func (m model) View() string {
 		view = m.addView()
 	case wireGuardScreen:
 		view = m.wireGuardView()
-	case wireGuardResultScreen, helpScreen:
+	case wireGuardResultScreen, helpScreen, liveScreen:
 		view = m.wireGuardResultView()
+	case backupScreen:
+		view = m.backupView()
 	default:
 		view = m.listView()
 	}
@@ -108,7 +110,7 @@ func (m model) layout() listLayout {
 	}
 	var result listLayout
 	for _, attempt := range attempts {
-		if attempt.cards && (width < minBoxedWidth || total == 0) {
+		if attempt.cards && (width < minBoxedWidth || total == 0 || m.simple) {
 			continue
 		}
 		footer := m.listFooter(width, attempt.help, attempt.messageLines)
@@ -169,7 +171,31 @@ func (m model) listView() string {
 	if boxed {
 		rules = panel(width, quietBorder, lines...)
 	}
+	if m.menu != nil {
+		// The menu may use all the room between header and footer.
+		rules = m.menuView(width, m.heightLimit()-lipgloss.Height(layout.header)-lipgloss.Height(layout.footer))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, layout.header, rules, layout.footer)
+}
+
+// menuView draws an open menu at most height lines tall, scrolling to keep
+// the selected item in view.
+func (m model) menuView(width, height int) string {
+	inner := innerWidth(width)
+	lines := []string{line(inner, brandStyle.Render(" "+m.menu.title+" "))}
+	items := make([]string, len(m.menu.items))
+	for index, item := range m.menu.items {
+		marker, style := "  ", valueStyle
+		if index == m.menu.cursor {
+			marker, style = selectedStyle.Render("> "), focusedStyle
+		}
+		items[index] = line(inner, marker+selectedStyle.Render(strings.ToUpper(item.key))+"  "+style.Render(item.label)+mutedStyle.Render("  "+item.hint))
+	}
+	chrome := lipgloss.Height(panel(width, accentBorder, "")) - 1
+	size := max(1, height-1-chrome)
+	start := min(max(0, m.menu.cursor-size/2), max(0, len(items)-size))
+	lines = append(lines, items[start:min(len(items), start+size)]...)
+	return panel(width, accentBorder, lines...)
 }
 
 func (m model) header(variant headerVariant, width int) string {
@@ -181,24 +207,32 @@ func (m model) header(variant headerVariant, width int) string {
 	if variant == tinyHeader {
 		return line(width, brandStyle.Render(" IP TABLE UI "))
 	}
+	if m.simple && variant != bareHeader {
+		return m.simpleHeader(variant, width, brand)
+	}
 	if variant == fullHeader {
 		items := make([]string, 0, 4)
 		if status := m.systemStatus; status != nil {
 			items = append(items,
 				labelStyle.Render("FORWARDING ")+onOff(status.Forwarding, "ON", "OFF (forwards blocked)"),
-				labelStyle.Render("ROUTE ")+addressStyle.Render(status.PublicInterface)+mutedStyle.Render(" -> ")+onOff(status.VPNUp, status.VPNInterface+" UP", status.VPNInterface+" DOWN"),
+				labelStyle.Render("ROUTE ")+addressStyle.Render(status.PublicInterface)+mutedStyle.Render(" -> ")+onOff(status.VPNUp, status.VPNInterface+" UP", status.VPNInterface+" DOWN")+vpnDetails(status),
 				labelStyle.Render("APPLY ON BOOT ")+onOff(status.BootRestore, "ON (rules survive reboot)", "OFF (rules lost on reboot)"),
 			)
 		}
 		if m.webControl != nil {
-			items = append(items, labelStyle.Render("WEB ")+onOff(m.webControl.Enabled(), m.webControl.StatusText(), m.webControl.StatusText()))
+			items = append(items, labelStyle.Render("WEB ")+m.webStatus())
+		}
+		for _, adapter := range m.trafficNow.Adapters {
+			items = append(items, labelStyle.Render(strings.ToUpper(adapter.Name)+" ")+
+				mutedStyle.Render("RX ")+portStyle.Render(traffic.FormatRate(adapter.InPerSecond))+
+				mutedStyle.Render(" TX ")+publicStyle.Render(traffic.FormatRate(adapter.OutPerSecond)))
 		}
 		lines := []string{brand}
 		if len(items) > 0 {
 			lines = append(lines, flow(innerWidth(width), items...))
 		}
 		if m.webControl != nil {
-			lines = append(lines, labelStyle.Render("TOKEN ")+publicStyle.Render(m.webControl.Token()))
+			lines = append(lines, m.tokenLine())
 		}
 		return panel(width, accentBorder, lines...)
 	}
@@ -206,7 +240,7 @@ func (m model) header(variant headerVariant, width int) string {
 	if status := m.systemStatus; status != nil {
 		summary = append(summary,
 			labelStyle.Render("FWD ")+onOff(status.Forwarding, "ON", "OFF"),
-			labelStyle.Render("ROUTE ")+addressStyle.Render(status.PublicInterface)+mutedStyle.Render("->")+onOff(status.VPNUp, status.VPNInterface+" UP", status.VPNInterface+" DOWN"),
+			labelStyle.Render(strings.ToUpper(vpnName(status))+" ")+onOff(status.VPNUp, status.VPNInterface+" UP", status.VPNInterface+" DOWN"),
 			labelStyle.Render("ON BOOT ")+onOff(status.BootRestore, "ON", "OFF"),
 		)
 	}
@@ -219,7 +253,7 @@ func (m model) header(variant headerVariant, width int) string {
 	}
 	if m.webControl != nil {
 		// The token is needed to sign in to the web UI, so it is never hidden.
-		lines = append(lines, labelStyle.Render("TOKEN ")+publicStyle.Render(m.webControl.Token()))
+		lines = append(lines, m.tokenLine())
 	}
 	if variant == bareHeader {
 		return wrap(width, lipgloss.JoinVertical(lipgloss.Left, lines...))
@@ -229,13 +263,12 @@ func (m model) header(variant headerVariant, width int) string {
 
 func (m model) listFooter(width int, variant helpVariant, messageLines int) string {
 	type binding struct{ key, description string }
-	bindings := []binding{{"UP/DOWN", "select"}, {"/", "search"}, {"A", "add"}, {"E", "edit"}, {"T", "on/off"}, {"I", "real client IP"}, {"D", "remove"}, {"R", "re-apply rules"}}
-	if m.system != nil {
-		bindings = append(bindings, binding{"F", "forwarding"}, binding{"B", "apply on boot"})
+	// Only the everyday keys are listed; M opens a menu with the rest
+	// (whose letters still work as shortcuts).
+	bindings := []binding{{"UP/DOWN", "select"}, {"ENTER", "actions"}, {"/", "search"}, {"A", "add"}, {"E", "edit"}, {"T", "on/off"}, {"D", "remove"}, {"W", "web"}, {"M", "more"}, {"?", "help"}, {"Q", "quit"}}
+	if m.menu != nil {
+		bindings = []binding{{"UP/DOWN", "select"}, {"ENTER", "choose"}, {"ESC", "close"}}
 	}
-	// U is always listed so the whiptail look is discoverable; without
-	// whiptail installed, pressing it explains how to install it.
-	bindings = append(bindings, binding{"G", "WireGuard"}, binding{"W", "web"}, binding{"U", "whiptail look"}, binding{"?", "help"}, binding{"Q", "quit"})
 	var help string
 	switch variant {
 	case fullHelp:
@@ -257,7 +290,15 @@ func (m model) listFooter(width int, variant helpVariant, messageLines int) stri
 		}
 		help = line(width, mutedStyle.Render("Keys: ")+selectedStyle.Render(strings.Join(letters, " ")))
 	}
-	if m.searching {
+	if m.prompt != nil {
+		prompt := selectedStyle.Render(m.prompt.label+": ") + focusedStyle.Render(m.prompt.value+"_") + mutedStyle.Render("  ENTER confirm  ESC cancel")
+		if variant == fullHelp {
+			prompt = wrap(width, prompt)
+		} else {
+			prompt = line(width, prompt) // cramped screens: one line
+		}
+		help = lipgloss.JoinVertical(lipgloss.Left, prompt, help)
+	} else if m.searching {
 		search := selectedStyle.Render("Search: ") + focusedStyle.Render(m.query+"_") + mutedStyle.Render("  ENTER keep  ESC clear  UP/DOWN browse")
 		help = lipgloss.JoinVertical(lipgloss.Left, line(width, search), help)
 	} else if m.query != "" {
@@ -285,7 +326,7 @@ func (m model) ruleCard(index, width int) string {
 	}
 	rule := m.rules[index]
 	selected := index == m.cursor
-	marker, nameStyle, border := "  ", labelStyle, quietBorder
+	marker, nameStyle, border := "  ", labelStyle, lipgloss.TerminalColor(quietBorder)
 	if selected {
 		marker, nameStyle, border = selectedStyle.Render("> "), selectedStyle, selectedBorder
 	}
@@ -293,7 +334,7 @@ func (m model) ruleCard(index, width int) string {
 	return panel(width, border,
 		line(inner, marker+onOff(rule.Enabled, "ENABLED", "DISABLED")+"  "+mutedStyle.Render(fmt.Sprintf("#%d", rule.ID))+"  "+nameStyle.Render(ruleLabel(rule.Name))),
 		line(inner, labelStyle.Render("PUBLIC ")+publicStyle.Render(fmt.Sprintf(":%d", rule.PublicPort))+mutedStyle.Render("   ->   TARGET ")+addressStyle.Render(rule.DestIP)+":"+portStyle.Render(fmt.Sprint(rule.DestPort))),
-		line(inner, labelStyle.Render("PROTOCOL ")+protocolStyle.Render(strings.ToUpper(rule.Protocol))+labelStyle.Render("   CLIENT IP ")+mutedStyle.Render(clientIPLabel(rule.KeepClientIP))),
+		line(inner, labelStyle.Render("PROTOCOL ")+protocolStyle.Render(strings.ToUpper(rule.Protocol))+labelStyle.Render("   CLIENT IP ")+mutedStyle.Render(clientIPLabel(rule.KeepClientIP))+enabledStyle.Render(m.ruleSpeed(rule))),
 	)
 }
 
@@ -305,11 +346,13 @@ func clientIPLabel(keep bool) string {
 }
 
 // rowColumns holds column widths so one-line rows line up like a table.
-type rowColumns struct{ public, target, protocol int }
+type rowColumns struct{ public, target, protocol, name, route int }
 
 func (m model) rowColumns(start, end int) rowColumns {
 	var columns rowColumns
 	for _, rule := range m.rules[start:end] {
+		columns.name = min(24, max(columns.name, ansi.StringWidth(ruleLabel(rule.Name))))
+		columns.route = max(columns.route, ansi.StringWidth(simpleRoute(rule)))
 		columns.public = max(columns.public, len(fmt.Sprintf(":%d", rule.PublicPort)))
 		columns.target = max(columns.target, len(fmt.Sprintf("%s:%d", rule.DestIP, rule.DestPort)))
 		columns.protocol = max(columns.protocol, len(rule.Protocol))
@@ -325,6 +368,9 @@ func pad(text string, width int) string {
 // the label rather than the address. Roomy rows add spacing; tight rows
 // squeeze a whole route into about 40 columns.
 func (m model) ruleRow(index, width int, roomy bool, columns rowColumns) string {
+	if m.simple {
+		return m.simpleRow(index, width, columns)
+	}
 	rule := m.rules[index]
 	marker, nameStyle := "  ", labelStyle
 	if index == m.cursor {
@@ -342,7 +388,12 @@ func (m model) ruleRow(index, width int, roomy bool, columns rowColumns) string 
 	if roomy {
 		text += pad(mutedStyle.Render(clientIPLabel(rule.KeepClientIP)), len("masked")) + gap
 	}
-	return line(width, text+mutedStyle.Render(fmt.Sprintf("#%d ", rule.ID))+nameStyle.Render(ruleLabel(rule.Name)))
+	text += mutedStyle.Render(fmt.Sprintf("#%d ", rule.ID)) + nameStyle.Render(ruleLabel(rule.Name))
+	if speed := m.ruleSpeed(rule); speed != "" && roomy && width >= 100 {
+		text = line(width-28, text)
+		text += strings.Repeat(" ", max(0, width-28-ansi.StringWidth(text))) + enabledStyle.Render(speed)
+	}
+	return line(width, text)
 }
 
 func ruleLabel(name string) string {
@@ -547,16 +598,25 @@ func (m model) wireGuardView() string {
 // helpTopics explains every key in plain words.
 var helpTopics = []struct{ section, key, title, text string }{
 	{"RULES", "UP/DOWN", "Select a rule", ""},
+	{"RULES", "ENTER", "Rule actions", "Opens a menu for the selected rule: edit, turn on or off, real client IP, remove."},
+	{"RULES", "M", "More actions", "Opens a menu with everything else: re-apply rules, forwarding, apply on boot, backups, web port, remove all, WireGuard, whiptail look. Each item's letter also works straight from the rule list."},
 	{"RULES", "/", "Search", "Filter the list by port, IP, name or #ID, or by keyword: on/up, off/down, tcp, udp, real, masked. Words combine, e.g. \"udp off\". ENTER keeps the filter, ESC clears it."},
 	{"RULES", "A / E", "Add / edit a rule", "Forward a public port on this server to a port on a machine behind the VPN."},
 	{"RULES", "T", "Turn a rule on or off", "Off stops the forward right away, including connections that are already open. The rule stays saved."},
 	{"RULES", "I", "Real client IP", "Off (default): the server sees every visitor as this VPS. On: it sees each visitor's real address, but replies must route back through the tunnel (README: Keep the Real Client IP)."},
 	{"RULES", "D", "Remove a rule", "Deletes it from the firewall and from the saved list."},
+	{"FIREWALL", "", "Traffic", "The header shows each adapter's speed (RX received, TX sent). A rule's speed shows on wide screens and in its ENTER menu: ▼ flows to your server, ▲ back to visitors."},
 	{"FIREWALL", "R", "Re-apply rules", "Rebuilds the firewall from your saved rules. Every change already applies automatically, so you only need this if something else (another script, ufw, Docker, iptables -F) wiped or changed the rules."},
 	{"FIREWALL", "F", "IPv4 forwarding", "Lets this server pass traffic on to other machines. Must be ON for any forward to work. The setting survives reboots."},
 	{"FIREWALL", "B", "Apply on boot", "Firewall rules live in memory and vanish when the server restarts. When ON, a startup service re-applies your saved rules automatically, so forwards come back after a reboot."},
+	{"FIREWALL", "L", "Live firewall rules", "Shows the port forwards as the firewall has them right now, with packet and byte counters (sudo iptables -t nat -L IPTUI_DNAT -n -v --line-numbers). R refreshes."},
+	{"RULES", "X", "Remove all rules", "Deletes every rule from the database and the firewall. You must type REMOVE ALL to confirm, and a backup is taken first so you can undo it from Backups (S)."},
+	{"OTHER", "S", "Backups", "Your rules and settings are backed up at startup and every 5 minutes while something changed. Back up by hand (N), download one (D gives a link that works for 10 minutes while the web UI is on), or restore any backup (ENTER): it replaces every rule and applies it to the firewall at once. The current state is backed up first, so a restore can be undone."},
+	{"OTHER", "P", "Web UI port", "Moves the web UI to another port right away and saves it, so it is used every time iptable-ui starts. Allow the new port in your firewall."},
 	{"OTHER", "G", "WireGuard setup", "Creates a WireGuard tunnel config for this VPS and a template for the home side."},
 	{"OTHER", "W", "Web UI", "Starts or stops the browser interface. Sign in with the TOKEN shown at the top."},
+	{"OTHER", "N", "Simple or detailed view", "Simple shows plain sentences and fewer details; detailed shows interface names, codes and columns. Saved for next time."},
+	{"OTHER", "O", "TUI look", "Switches between Classic, Readable (bright, high contrast), Light terminal (for white backgrounds), Ocean and Plain (no colors, for monochrome terminals and screen readers). Saved for next time."},
 	{"OTHER", "U", "Whiptail look", "Switches to classic blue whiptail menus (like raspi-config). Needs the whiptail package: apt install whiptail (Fedora: dnf install newt). Choose \"Switch to the full TUI\" there to come back."},
 	{"OTHER", "Q", "Quit", "Your rules keep working after you quit."},
 }
@@ -585,6 +645,9 @@ func (m model) resultLines(width int) []string {
 	if m.activeScreen == helpScreen {
 		return helpLines(width)
 	}
+	if m.activeScreen == liveScreen {
+		return m.liveLines(width)
+	}
 	blocks := []string{
 		brandStyle.Render(" WIREGUARD CONFIG CREATED "),
 		labelStyle.Render("VPS CONFIG"), addressStyle.Render(m.wgResult.ConfigPath),
@@ -607,10 +670,17 @@ func (m model) resultWindow() (lines []string, start, size int, footer string) {
 	lines = m.resultLines(innerWidth(width))
 	chrome := lipgloss.Height(panel(width, accentBorder, "")) - 1
 	keys := []string{helpKey("ENTER", "return")}
+	if m.activeScreen == liveScreen {
+		view := "raw output"
+		if m.liveRaw {
+			view = "table"
+		}
+		keys = append(keys, helpKey("R", "refresh"), helpKey("T", view))
+	}
 	footer = flow(width, keys...)
 	size = max(1, m.heightLimit()-lipgloss.Height(footer)-chrome)
 	if size < len(lines) {
-		footer = flow(width, helpKey("UP/DOWN", "scroll"), helpKey("ENTER", "return"))
+		footer = flow(width, append([]string{helpKey("UP/DOWN", "scroll")}, keys...)...)
 		size = max(1, m.heightLimit()-lipgloss.Height(footer)-chrome)
 	}
 	start = min(max(0, m.scroll), max(0, len(lines)-size))
@@ -629,7 +699,7 @@ func (m model) wireGuardResultView() string {
 
 // panel draws a rounded box exactly width columns wide. Too narrow for a
 // border, it falls back to plain wrapped text.
-func panel(width int, color lipgloss.Color, lines ...string) string {
+func panel(width int, color lipgloss.TerminalColor, lines ...string) string {
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	if width < 8 {
 		return wrap(width, content)
@@ -699,4 +769,297 @@ func fitScreen(view string, width, height int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+var backupKinds = map[string]string{
+	backup.Startup:    "on startup",
+	backup.Auto:       "automatic",
+	backup.Manual:     "manual",
+	backup.PreRestore: "before a restore",
+	backup.PreClear:   "before removing all",
+	backup.Uploaded:   "uploaded",
+}
+
+// backupView lists backups, keeping the selected one in view.
+func (m model) backupView() string {
+	width := m.contentWidth()
+	inner := innerWidth(width)
+	keys := []formKey{{"UP/DOWN", "select"}, {"N", "back up now"}, {"D", "download"}, {"ENTER", "restore"}, {"I", "import file"}, {"O", "folder"}, {"ESC", "back"}}
+	chrome := lipgloss.Height(panel(width, accentBorder, "")) - 1
+	// Shrink the help and message until at least one backup fits.
+	var footer string
+	var available int
+	for _, variant := range []helpVariant{fullHelp, compactHelp, minimalHelp} {
+		messageLines := maxMessageLines
+		if variant != fullHelp {
+			messageLines = 1
+		}
+		help := formHelp(width, variant, keys)
+		if m.prompt != nil {
+			prompt := selectedStyle.Render(m.prompt.label+": ") + focusedStyle.Render(m.prompt.value+"_") + mutedStyle.Render("  ENTER confirm  ESC cancel")
+			if variant == fullHelp {
+				prompt = wrap(width, prompt)
+			} else {
+				prompt = line(width, prompt)
+			}
+			help = lipgloss.JoinVertical(lipgloss.Left, prompt, help)
+		}
+		footer = m.withMessage(width, help, messageLines)
+		available = m.heightLimit() - lipgloss.Height(footer) - chrome - 1 // title
+		if available >= 3 {
+			break
+		}
+	}
+	folder := ""
+	if m.backups != nil {
+		folder = "Saved in " + m.backups.Folder() + ". "
+	}
+	intro := strings.Split(wrap(inner, mutedStyle.Render(folder+"Taken at startup and every 5 minutes while something changed. Restoring replaces every rule and applies it at once; the current state is backed up first.")), "\n")
+	if available-len(intro) < 3 {
+		intro = nil // too short: keep the list, drop the explanation
+	}
+	rows := make([]string, 0, len(m.backupList))
+	for index, info := range m.backupList {
+		marker, style := "  ", valueStyle
+		if index == m.backupCursor {
+			marker, style = selectedStyle.Render("> "), focusedStyle
+		}
+		rows = append(rows, line(inner, marker+style.Render(info.Time.Local().Format("2006-01-02 15:04"))+"  "+
+			pad(labelStyle.Render(fmt.Sprintf("%d rules", info.Rules)), 9)+"  "+mutedStyle.Render(backupKinds[info.Kind])))
+	}
+	if len(rows) == 0 {
+		rows = append(rows, mutedStyle.Render("No backups yet. Press N to make one."))
+	}
+	size := max(1, available-len(intro))
+	start := min(max(0, m.backupCursor-size/2), max(0, len(rows)-size))
+	lines := append([]string{line(inner, brandStyle.Render(" BACKUPS ")+mutedStyle.Render(fmt.Sprintf("  %d saved", len(m.backupList))))}, intro...)
+	lines = append(lines, rows[start:min(len(rows), start+size)]...)
+	return lipgloss.JoinVertical(lipgloss.Left, panel(width, accentBorder, lines...), footer)
+}
+
+// webStatus is the web UI status with its address masked unless revealed;
+// the address is a link to the full sign-in URL, so it can still be opened.
+func (m model) webStatus() string {
+	status := m.webControl.StatusText()
+	base := strings.TrimSuffix(m.webControl.URL(), "/")
+	shown := base
+	if !m.reveal {
+		shown = strings.TrimSuffix(web.MaskURL(base+"/"), "/")
+	}
+	before, after, found := strings.Cut(status, base)
+	if !found {
+		return onOff(m.webControl.Enabled(), status, status)
+	}
+	address := shown
+	if m.webControl.Enabled() {
+		address = hyperlink(m.webControl.SignInURL(), shown)
+	}
+	return onOff(m.webControl.Enabled(), before, before) + address + onOff(m.webControl.Enabled(), after, after)
+}
+
+func (m model) tokenLine() string {
+	token := web.MaskToken(m.webControl.Token())
+	hint := "  C copy sign-in link  V show"
+	if m.reveal {
+		token = m.webControl.Token()
+		hint = "  C copy sign-in link  V hide"
+	}
+	return labelStyle.Render("TOKEN ") + publicStyle.Render(token) + mutedStyle.Render(hint)
+}
+
+// hyperlink makes text a clickable link (OSC 8) in terminals that support
+// it; others just show the text. Plain-text terminals get no escape codes.
+func hyperlink(target, text string) string {
+	if lipgloss.ColorProfile() == termenv.Ascii {
+		return text
+	}
+	return "\x1b]8;;" + target + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// liveLines shows the live firewall rules as a colored table, or as the raw
+// iptables output when the user asks for it (or it cannot be parsed).
+func (m model) liveLines(width int) []string {
+	lines := []string{brandStyle.Render(" LIVE FIREWALL RULES "), mutedStyle.Render("sudo " + strings.Join(firewall.LiveRulesCommand, " ")), ""}
+	table, parsed := firewall.ParseLiveRules(m.liveOutput)
+	if m.liveRaw || !parsed {
+		for _, text := range strings.Split(strings.TrimRight(m.liveOutput, "\n"), "\n") {
+			lines = append(lines, strings.Split(wrap(width, text), "\n")...)
+		}
+		return lines
+	}
+	if len(table.Entries) == 0 {
+		return append(lines, mutedStyle.Render("No forwards are active in the firewall. Enabled rules appear here once applied."))
+	}
+	active := 0
+	for _, entry := range table.Entries {
+		if entry.Active {
+			active++
+		}
+	}
+	lines = append(lines, sectionStyle.Render(table.Chain)+mutedStyle.Render(fmt.Sprintf("  %d rules, %d with traffic", len(table.Entries), active)))
+	var columns struct{ public, target, in, packets, bytes int }
+	for _, entry := range table.Entries {
+		columns.public = max(columns.public, len(entry.PublicPort)+1)
+		columns.target = max(columns.target, len(entry.ForwardTo))
+		columns.in = max(columns.in, len(entry.In))
+		columns.packets = max(columns.packets, len(entry.Packets), len("PACKETS"))
+		columns.bytes = max(columns.bytes, len(readableCounter(entry.Bytes)), len("DATA"))
+	}
+	lines = append(lines, line(width, labelStyle.Render(pad("#", 4)+pad("PROTO", 6)+pad("FORWARD", columns.public+4+columns.target+2)+pad("IN", columns.in+2)+
+		padLeft("PACKETS", columns.packets)+"  "+padLeft("DATA", columns.bytes))))
+	for _, entry := range table.Entries {
+		counters := padLeft(entry.Packets, columns.packets) + "  " + padLeft(readableCounter(entry.Bytes), columns.bytes)
+		traffic := mutedStyle.Render(counters)
+		if entry.Active {
+			traffic = enabledStyle.Render(counters)
+		}
+		forward := pad(publicStyle.Render(":"+entry.PublicPort), columns.public) + mutedStyle.Render(" -> ") + pad(addressStyle.Render(entry.ForwardTo), columns.target)
+		if entry.ForwardTo == "" {
+			forward = pad(labelStyle.Render(entry.Target+" "+entry.Extra), columns.public+4+columns.target)
+		}
+		row := mutedStyle.Render(pad(strconv.Itoa(entry.Number), 4)) + pad(protocolStyle.Render(entry.Protocol), 6) + forward + "  " +
+			pad(labelStyle.Render(entry.In), columns.in) + "  " + traffic
+		if entry.Extra != "" && entry.ForwardTo != "" {
+			row += mutedStyle.Render("  " + entry.Extra)
+		}
+		lines = append(lines, strings.Split(wrap(width, row), "\n")...)
+	}
+	return lines
+}
+
+// vpnName is the kind of VPN, or "VPN" when it is not known.
+func vpnName(status *system.Status) string {
+	if status.VPNKind == "" {
+		return "VPN"
+	}
+	return status.VPNKind
+}
+
+// vpnDetails names the VPN and this server's address on it, for example
+// " (Tailscale 100.64.0.1)".
+func vpnDetails(status *system.Status) string {
+	details := vpnName(status)
+	if status.VPNAddress != "" {
+		details += " " + status.VPNAddress
+	}
+	return mutedStyle.Render(" (" + details + ")")
+}
+
+func padLeft(text string, width int) string {
+	return strings.Repeat(" ", max(0, width-ansi.StringWidth(text))) + text
+}
+
+// readableCounter turns iptables' byte counts ("2520", "73K", "1.2M") into
+// units people read ("2.5 KB", "73 KB", "1.2 MB").
+func readableCounter(value string) string {
+	multiplier := 1.0
+	switch {
+	case strings.HasSuffix(value, "K"):
+		multiplier = 1e3
+	case strings.HasSuffix(value, "M"):
+		multiplier = 1e6
+	case strings.HasSuffix(value, "G"):
+		multiplier = 1e9
+	case strings.HasSuffix(value, "T"):
+		multiplier = 1e12
+	}
+	number, err := strconv.ParseFloat(strings.TrimRight(value, "KMGT"), 64)
+	if err != nil {
+		return value
+	}
+	return traffic.FormatBytes(number * multiplier)
+}
+
+// simpleHeader states the gateway's condition in plain sentences.
+func (m model) simpleHeader(variant headerVariant, width int, brand string) string {
+	lines := []string{brand}
+	if status := m.systemStatus; status != nil {
+		vpn := vpnName(status)
+		if variant == compactHeader {
+			lines = append(lines, flow(innerWidth(width),
+				onOff(status.Forwarding, "Forwarding on", "Forwarding OFF"),
+				onOff(status.VPNUp, vpn+" connected", vpn+" down"),
+				onOff(status.BootRestore, "Rules kept after reboot", "Rules lost after reboot")))
+		} else {
+			connected := "Connected through " + vpn
+			if status.VPNAddress != "" {
+				connected += " (this server is " + status.VPNAddress + " on it)"
+			}
+			lines = append(lines,
+				onOff(status.Forwarding, "Forwarding is on.", "Forwarding is off, so forwards do not work (press F to turn it on)."),
+				onOff(status.VPNUp, connected+".", vpn+" ("+status.VPNInterface+") is down, so forwards cannot reach home."),
+				onOff(status.BootRestore, "After a reboot: your rules come back automatically.", "After a reboot: rules are lost until you open iptable-ui (press B to fix)."),
+			)
+		}
+	}
+	if m.webControl != nil {
+		webLine := mutedStyle.Render("Web UI is off (press W to start it).")
+		if m.webControl.Enabled() {
+			webLine = enabledStyle.Render("Web UI is on") + mutedStyle.Render(" at ") + m.webAddressLink() + mutedStyle.Render(". C copies the sign-in link.")
+		}
+		lines = append(lines, webLine)
+	}
+	if variant == fullHeader && len(m.trafficNow.Adapters) > 0 {
+		parts := make([]string, 0, len(m.trafficNow.Adapters))
+		for _, adapter := range m.trafficNow.Adapters {
+			name := "Internet"
+			if m.systemStatus != nil && adapter.Name == m.systemStatus.VPNInterface {
+				name = vpnName(m.systemStatus)
+			}
+			parts = append(parts, labelStyle.Render(name+" ")+portStyle.Render("↓ "+traffic.FormatRate(adapter.InPerSecond))+" "+publicStyle.Render("↑ "+traffic.FormatRate(adapter.OutPerSecond)))
+		}
+		lines = append(lines, flow(innerWidth(width), parts...))
+	}
+	if m.webControl != nil && m.reveal {
+		lines = append(lines, m.tokenLine())
+	}
+	return panel(width, accentBorder, lines...)
+}
+
+// webAddressLink is the web UI address, masked unless revealed, linking to
+// the full sign-in URL.
+func (m model) webAddressLink() string {
+	base := strings.TrimSuffix(m.webControl.URL(), "/")
+	shown := base
+	if !m.reveal {
+		shown = strings.TrimSuffix(web.MaskURL(base+"/"), "/")
+	}
+	return hyperlink(m.webControl.SignInURL(), addressStyle.Render(shown))
+}
+
+// simpleRoute is "port 25565 → 10.66.0.2:25565": the port this server
+// listens on, then the destination address and port.
+func simpleRoute(rule store.Rule) string {
+	return fmt.Sprintf("port %d → %s:%d", rule.PublicPort, rule.DestIP, rule.DestPort)
+}
+
+func protocolWords(protocol string) string {
+	if protocol == "both" {
+		return "TCP+UDP"
+	}
+	return strings.ToUpper(protocol)
+}
+
+// simpleRow is a rule in plain words: "On   Minecraft   port 25565 → 10.66.0.2:25565   TCP+UDP".
+// Narrow screens put the route first, so a cut takes the name instead.
+func (m model) simpleRow(index, width int, columns rowColumns) string {
+	rule := m.rules[index]
+	marker, nameStyle := "  ", valueStyle
+	if index == m.cursor {
+		marker, nameStyle = selectedStyle.Render("> "), selectedStyle
+	}
+	name := pad(nameStyle.Render(line(columns.name, ruleLabel(rule.Name))), columns.name)
+	route := pad(addressStyle.Render(simpleRoute(rule)), columns.route)
+	text := marker + onOff(rule.Enabled, "On ", "Off") + "  " + name + "  " + route + "  " + protocolStyle.Render(protocolWords(rule.Protocol))
+	if width < 60 {
+		text = marker + onOff(rule.Enabled, "On ", "Off") + " " + route + " " + protocolStyle.Render(protocolWords(rule.Protocol)) + " " + nameStyle.Render(ruleLabel(rule.Name))
+	}
+	if rule.KeepClientIP {
+		text += mutedStyle.Render("  real IPs")
+	}
+	if speed := m.ruleSpeed(rule); speed != "" && width >= 100 {
+		text = line(width-28, text)
+		text += strings.Repeat(" ", max(0, width-28-ansi.StringWidth(text))) + enabledStyle.Render(speed)
+	}
+	return line(width, text)
 }

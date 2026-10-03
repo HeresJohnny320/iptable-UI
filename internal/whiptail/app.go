@@ -10,13 +10,16 @@ import (
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
 	"github.com/HeresJohnny320/iptable-ui/internal/system"
+	"github.com/HeresJohnny320/iptable-ui/internal/web"
 )
 
 type WebControl interface {
 	Toggle() (bool, error)
 	Enabled() bool
 	StatusText() string
+	MaskedStatusText() string
 	Token() string
+	SignInURL() string
 }
 
 type SystemControl interface {
@@ -47,7 +50,9 @@ Re-apply rules: rebuilds the firewall from your saved rules. Only needed if some
 
 IPv4 forwarding: lets this server pass traffic on to other machines. Must be ON for any forward to work. Survives reboots.
 
-Apply rules on boot: firewall rules live in memory and vanish when the server restarts. When ON, a startup service re-applies your saved rules automatically.`
+Apply rules on boot: firewall rules live in memory and vanish when the server restarts. When ON, a startup service re-applies your saved rules automatically.
+
+Switch to the full TUI: the full-screen interface with everything else, such as backups, live firewall rules, search, the web UI port and WireGuard setup.`
 
 // Run shows the whiptail menus until the user quits. It reports whether the
 // user asked to switch to the full TUI instead.
@@ -69,8 +74,11 @@ func Run(dialog Dialog, service app.Service, web WebControl, host SystemControl)
 		}
 		if web != nil {
 			items = append(items, Item{"web", map[bool]string{true: "Web UI: stop", false: "Web UI: start"}[web.Enabled()]})
+			if web.Enabled() {
+				items = append(items, Item{"link", "Show web UI sign-in link"})
+			}
 		}
-		items = append(items, Item{"restore", "Re-apply rules (rebuild the firewall from saved rules)"}, Item{"help", "Help: what do these options do?"}, Item{"tui", "Switch to the full TUI (WireGuard setup)"}, Item{"quit", "Quit"})
+		items = append(items, Item{"restore", "Re-apply rules (rebuild the firewall from saved rules)"}, Item{"help", "Help: what do these options do?"}, Item{"tui", "Switch to the full TUI"}, Item{"quit", "Quit"})
 
 		tag, ok, err := dialog.Menu(title, m.statusText(rules), items, choice)
 		if err != nil {
@@ -96,7 +104,9 @@ func Run(dialog Dialog, service app.Service, web WebControl, host SystemControl)
 			m.report(result, host.SetBootRestore(context.Background(), !status.BootRestore))
 		case "web":
 			enabled, toggleErr := web.Toggle()
-			m.report("Web UI "+map[bool]string{true: "started: " + web.StatusText(), false: "stopped"}[enabled], toggleErr)
+			m.report("Web UI "+map[bool]string{true: "started: " + web.MaskedStatusText(), false: "stopped"}[enabled], toggleErr)
+		case "link":
+			err = dialog.Message("Web UI sign-in link", "Open this link to use the web UI already signed in (select it to copy):\n\n"+web.SignInURL()+"\n\nToken: "+web.Token()+"\n\nAnyone with this link can manage your forwards until iptable-ui restarts, so keep it private.")
 		case "restore":
 			m.report("Saved rules re-applied to the firewall", service.Reconcile(context.Background()))
 		case "help":
@@ -124,10 +134,17 @@ func (m *menu) statusText(rules []store.Rule) string {
 		if status.VPNUp {
 			link = "UP"
 		}
-		lines = append(lines, fmt.Sprintf("Forwarding %s | Route %s -> %s %s | Apply on boot %s", onOff(status.Forwarding), status.PublicInterface, status.VPNInterface, link, onOff(status.BootRestore)))
+		kind := status.VPNKind
+		if kind == "" {
+			kind = "VPN"
+		}
+		if status.VPNAddress != "" {
+			kind += " " + status.VPNAddress
+		}
+		lines = append(lines, fmt.Sprintf("Forwarding %s | Route %s -> %s (%s) %s | Apply on boot %s", onOff(status.Forwarding), status.PublicInterface, status.VPNInterface, kind, link, onOff(status.BootRestore)))
 	}
 	if m.web != nil {
-		lines = append(lines, "Web UI "+m.web.StatusText(), "Token "+m.web.Token())
+		lines = append(lines, "Web UI "+m.web.MaskedStatusText(), "Token "+web.MaskToken(m.web.Token())+"  (choose \"Show web UI sign-in link\" to see it)")
 	}
 	lines = append(lines, fmt.Sprintf("Rules: %d saved, %d enabled", len(rules), enabled))
 	if m.last != "" {

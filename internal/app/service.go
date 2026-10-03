@@ -16,6 +16,7 @@ type RuleStore interface {
 	Update(context.Context, store.Rule) (store.Rule, error)
 	SetEnabled(context.Context, int64, bool) error
 	Delete(context.Context, int64) error
+	DeleteAll(context.Context) ([]store.Rule, error)
 }
 
 type Firewall interface {
@@ -32,6 +33,9 @@ type ConnectionControl interface {
 type Service struct {
 	Store    RuleStore
 	Firewall Firewall
+	// BeforeDeleteAll runs before every rule is removed, to take a backup.
+	// If it fails, nothing is removed.
+	BeforeDeleteAll func(context.Context) error
 }
 
 func (s Service) List(ctx context.Context) ([]store.Rule, error) {
@@ -136,6 +140,54 @@ func (s Service) Delete(ctx context.Context, id int64) (string, error) {
 		return "", fmt.Errorf("rule deleted from database but firewall apply failed: %w", err)
 	}
 	return s.closeConnections(ctx, rule, true), nil
+}
+
+// LiveInspector is implemented by firewalls that can show their live rules.
+type LiveInspector interface {
+	LiveRules(context.Context) (string, error)
+}
+
+// LiveRules returns the forwards as the kernel has them right now.
+func (s Service) LiveRules(ctx context.Context) (string, error) {
+	inspector, ok := s.Firewall.(LiveInspector)
+	if !ok {
+		return "", errors.New("live firewall rules are unavailable")
+	}
+	return inspector.LiveRules(ctx)
+}
+
+// DeleteAll removes every rule, applies the empty rule set to the firewall
+// and closes open connections. It returns how many rules were removed and an
+// optional notice for the user.
+func (s Service) DeleteAll(ctx context.Context) (int, string, error) {
+	if s.BeforeDeleteAll != nil {
+		if err := s.BeforeDeleteAll(ctx); err != nil {
+			return 0, "", fmt.Errorf("nothing was removed because the backup failed: %w", err)
+		}
+	}
+	removed, err := s.Store.DeleteAll(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	if err := s.Reconcile(ctx); err != nil {
+		return len(removed), "", fmt.Errorf("rules removed from the database but firewall apply failed: %w", err)
+	}
+	control, ok := s.Firewall.(ConnectionControl)
+	if !ok {
+		return len(removed), "", nil
+	}
+	closed := 0
+	for _, rule := range removed {
+		count, err := control.Disconnect(ctx, rule)
+		if errors.Is(err, firewall.ErrNoConntrack) {
+			return len(removed), "Connections that were already open stay up until they go idle; install conntrack to close them immediately", nil
+		}
+		closed += count
+	}
+	if closed > 0 {
+		return len(removed), fmt.Sprintf("Closed %d open connection(s)", closed), nil
+	}
+	return len(removed), "", nil
 }
 
 func (s Service) closeConnections(ctx context.Context, rule store.Rule, needConntrack bool) string {

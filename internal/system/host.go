@@ -43,7 +43,11 @@ type Status struct {
 	PublicInterface string `json:"publicInterface"`
 	VPNInterface    string `json:"vpnInterface"`
 	VPNUp           bool   `json:"vpnUp"`
-	BootRestore     bool   `json:"bootRestore"`
+	// VPNKind names the VPN (WireGuard, Tailscale, NetBird, ...) and
+	// VPNAddress is this server's IPv4 address on it.
+	VPNKind     string `json:"vpnKind"`
+	VPNAddress  string `json:"vpnAddress"`
+	BootRestore bool   `json:"bootRestore"`
 }
 
 type Host struct {
@@ -55,6 +59,8 @@ type Host struct {
 	// IPv4Lookup reports whether an interface has an IPv4 address; nil asks
 	// the live system. Tests replace it.
 	IPv4Lookup func(name string) bool
+	// IPv4Address returns an interface's IPv4 address; nil asks the live system.
+	IPv4Address func(name string) string
 	// RestoreCommand is the ExecStart command line of the boot restore unit.
 	RestoreCommand []string
 }
@@ -65,6 +71,8 @@ func (h Host) Status(context.Context) Status {
 		PublicInterface: h.PublicInterface,
 		VPNInterface:    h.VPNInterface,
 		VPNUp:           h.interfaceUp(h.VPNInterface),
+		VPNKind:         VPNKind(h.VPNInterface, h.isWireGuard(h.VPNInterface)),
+		VPNAddress:      h.ipv4Address(h.VPNInterface),
 		BootRestore:     h.bootRestoreEnabled(),
 	}
 }

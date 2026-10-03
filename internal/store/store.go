@@ -67,6 +67,10 @@ func (s *Store) migrate() error {
 			updated_at TEXT NOT NULL,
 			UNIQUE(public_port, protocol)
 		);
+		CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -215,7 +219,7 @@ func (s *Store) ImportMissing(ctx context.Context, rules []Rule) (int, error) {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		name := rule.Name
 		if name == "" {
-			name = "Imported from iptables"
+			name = importedName
 		}
 		result, err := tx.ExecContext(ctx, `INSERT INTO rules(name, public_port, dest_ip, dest_port, protocol, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?)`, name, rule.PublicPort, rule.DestIP, rule.DestPort, rule.Protocol, now, now)
 		if err != nil {
@@ -268,6 +272,198 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
+// importedName is the label given to rules found in iptables.
+const importedName = "Imported from iptables"
+
+// CombineProtocols turns a TCP rule and a UDP rule for the same public port
+// and destination into one "both" rule, as other scripts add them in pairs.
+func CombineProtocols(rules []Rule) []Rule {
+	type forward struct {
+		port     uint16
+		ip       string
+		destPort uint16
+	}
+	index := make(map[forward][]int)
+	for position, rule := range rules {
+		key := forward{rule.PublicPort, rule.DestIP, rule.DestPort}
+		index[key] = append(index[key], position)
+	}
+	combined := make([]Rule, 0, len(rules))
+	skip := make(map[int]bool)
+	for position, rule := range rules {
+		if skip[position] {
+			continue
+		}
+		pair := index[forward{rule.PublicPort, rule.DestIP, rule.DestPort}]
+		if len(pair) == 2 && rule.Protocol != "both" {
+			other := rules[pair[0]]
+			if pair[0] == position {
+				other = rules[pair[1]]
+			}
+			if (rule.Protocol == "tcp" && other.Protocol == "udp") || (rule.Protocol == "udp" && other.Protocol == "tcp") {
+				rule.Protocol = "both"
+				rule.Name = betterName(rule.Name, other.Name)
+				skip[pair[0]], skip[pair[1]] = true, true
+			}
+		}
+		combined = append(combined, rule)
+	}
+	return combined
+}
+
+func betterName(first, second string) string {
+	if first == "" || first == importedName {
+		if second != "" {
+			return second
+		}
+	}
+	return first
+}
+
+// MergeProtocolPairs combines saved TCP and UDP rules that differ only in
+// protocol into one "both" rule, keeping the older rule's ID. It returns how
+// many pairs were combined.
+func (s *Store) MergeProtocolPairs(ctx context.Context) (int, error) {
+	rules, err := s.List(ctx)
+	if err != nil {
+		return 0, err
+	}
+	type forward struct {
+		port         uint16
+		ip           string
+		destPort     uint16
+		enabled      bool
+		keepClientIP bool
+	}
+	pairs := make(map[forward][]Rule)
+	for _, rule := range rules {
+		if rule.Protocol == "tcp" || rule.Protocol == "udp" {
+			key := forward{rule.PublicPort, rule.DestIP, rule.DestPort, rule.Enabled, rule.KeepClientIP}
+			pairs[key] = append(pairs[key], rule)
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin merge: %w", err)
+	}
+	defer tx.Rollback()
+	merged := 0
+	for _, pair := range pairs {
+		if len(pair) != 2 || pair[0].Protocol == pair[1].Protocol {
+			continue
+		}
+		keep, drop := pair[0], pair[1]
+		if drop.ID < keep.ID {
+			keep, drop = drop, keep
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE id = ?`, drop.ID); err != nil {
+			return 0, fmt.Errorf("merge rule %d: %w", drop.ID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE rules SET protocol = 'both', name = ?, updated_at = ? WHERE id = ?`,
+			betterName(keep.Name, drop.Name), time.Now().UTC().Format(time.RFC3339Nano), keep.ID); err != nil {
+			return 0, fmt.Errorf("merge rule %d: %w", keep.ID, err)
+		}
+		merged++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit merge: %w", err)
+	}
+	return merged, nil
+}
+
+// DeleteAll removes every rule and returns the removed rules.
+func (s *Store) DeleteAll(ctx context.Context) ([]Rule, error) {
+	rules, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM rules`); err != nil {
+		return nil, fmt.Errorf("remove all rules: %w", err)
+	}
+	return rules, nil
+}
+
+// Setting returns a stored setting, or "" when it is not set.
+func (s *Store) Setting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read setting %s: %w", key, err)
+	}
+	return value, nil
+}
+
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+		return fmt.Errorf("save setting %s: %w", key, err)
+	}
+	return nil
+}
+
+// Settings returns every stored setting.
+func (s *Store) Settings(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings`)
+	if err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
+	defer rows.Close()
+	settings := make(map[string]string)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("read settings: %w", err)
+		}
+		settings[key] = value
+	}
+	return settings, rows.Err()
+}
+
+// Backup writes a consistent snapshot of the database to path, even while
+// it is in use.
+func (s *Store) Backup(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("back up database: %w", err)
+	}
+	return nil
+}
+
+// ReplaceAll swaps every rule and setting for the given ones in a single
+// transaction, keeping rule IDs and timestamps. It is used to restore a backup.
+func (s *Store) ReplaceAll(ctx context.Context, rules []Rule, settings map[string]string) error {
+	for _, rule := range rules {
+		if err := validateRule(rule); err != nil {
+			return fmt.Errorf("rule %d in backup: %w", rule.ID, err)
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin restore: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rules; DELETE FROM settings`); err != nil {
+		return fmt.Errorf("clear for restore: %w", err)
+	}
+	for _, rule := range rules {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO rules(id, name, public_port, dest_ip, dest_port, protocol, enabled, keep_client_ip, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			rule.ID, rule.Name, rule.PublicPort, rule.DestIP, rule.DestPort, rule.Protocol, rule.Enabled, rule.KeepClientIP,
+			rule.CreatedAt.UTC().Format(time.RFC3339Nano), rule.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("restore rule %d: %w", rule.ID, err)
+		}
+	}
+	for key, value := range settings {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?)`, key, value); err != nil {
+			return fmt.Errorf("restore setting %s: %w", key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit restore: %w", err)
+	}
+	return nil
+}
+
 func scanRule(row rowScanner) (Rule, error) {
 	var rule Rule
 	var enabled, keepClientIP int
@@ -281,6 +477,9 @@ func scanRule(row rowScanner) (Rule, error) {
 	rule.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return rule, nil
 }
+
+// Validate reports whether a rule has usable ports, address and protocol.
+func (r Rule) Validate() error { return validateRule(r) }
 
 func validateRule(rule Rule) error {
 	if rule.PublicPort == 0 || rule.DestPort == 0 {

@@ -187,3 +187,44 @@ func TestEditingForwardClosesOldConnections(t *testing.T) {
 		t.Fatalf("moving the destination should close connections to the old one: %v, %+v", err, firewall.disconnected)
 	}
 }
+
+func TestDeleteAllBacksUpFirst(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	firewall := &connectionFirewall{closed: 1}
+	backedUp := 0
+	service := Service{Store: database, Firewall: firewall, BeforeDeleteAll: func(context.Context) error {
+		backedUp++
+		if rules, _ := database.List(ctx); len(rules) != 2 {
+			t.Errorf("the backup must run while the rules still exist, saw %d", len(rules))
+		}
+		return nil
+	}}
+	for _, port := range []uint16{80, 443} {
+		if _, err := service.Add(ctx, store.Rule{PublicPort: port, DestIP: "10.0.0.2", DestPort: port, Protocol: "tcp"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, notice, err := service.DeleteAll(ctx)
+	if err != nil || removed != 2 || backedUp != 1 || notice != "Closed 2 open connection(s)" {
+		t.Fatalf("removed %d, notice %q, backups %d, err %v", removed, notice, backedUp, err)
+	}
+	if len(firewall.lastRules) != 0 {
+		t.Fatalf("the firewall should be applied with no rules, got %+v", firewall.lastRules)
+	}
+
+	if _, err := service.Add(ctx, store.Rule{PublicPort: 22, DestIP: "10.0.0.2", DestPort: 22, Protocol: "tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	service.BeforeDeleteAll = func(context.Context) error { return errors.New("disk full") }
+	if _, _, err := service.DeleteAll(ctx); err == nil || !strings.Contains(err.Error(), "nothing was removed") {
+		t.Fatalf("a failed backup must stop the removal, got %v", err)
+	}
+	if rules, _ := database.List(ctx); len(rules) != 1 {
+		t.Fatal("rules must survive when the backup fails")
+	}
+}

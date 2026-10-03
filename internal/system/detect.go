@@ -185,6 +185,51 @@ func (h Host) hasIPv4(name string) bool {
 	return false
 }
 
+// VPNKind names the VPN behind an interface. NetBird runs on WireGuard, so
+// names are checked before the WireGuard device type.
+func VPNKind(name string, wireGuard bool) string {
+	switch {
+	case name == "":
+		return ""
+	case strings.HasPrefix(name, "tailscale"):
+		return "Tailscale"
+	case strings.HasPrefix(name, "wt"):
+		return "NetBird"
+	case strings.HasPrefix(name, "zt"):
+		return "ZeroTier"
+	case strings.HasPrefix(name, "nebula"):
+		return "Nebula"
+	case wireGuard || strings.HasPrefix(name, "wg"):
+		return "WireGuard"
+	case strings.HasPrefix(name, "tun"), strings.HasPrefix(name, "tap"):
+		return "OpenVPN"
+	case strings.HasPrefix(name, "ppp"):
+		return "PPP"
+	default:
+		return "VPN"
+	}
+}
+
+func (h Host) ipv4Address(name string) string {
+	if h.IPv4Address != nil {
+		return h.IPv4Address(name)
+	}
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return ""
+	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, address := range addresses {
+		if network, ok := address.(*net.IPNet); ok && network.IP.To4() != nil {
+			return network.IP.String()
+		}
+	}
+	return ""
+}
+
 func (h Host) isWireGuard(name string) bool {
 	uevent, err := os.ReadFile(h.path(filepath.Join(sysClassNet, name, "uevent")))
 	return err == nil && strings.Contains(string(uevent), "DEVTYPE=wireguard")

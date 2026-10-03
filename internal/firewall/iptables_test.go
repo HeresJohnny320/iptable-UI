@@ -160,3 +160,14 @@ func TestOtherForwardsFindsRulesOutsideManagedChain(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveRulesRunsTheListCommand(t *testing.T) {
+	runner := &scriptedRunner{output: "Chain IPTUI_DNAT (1 references)\nnum   pkts bytes target\n1      12   720 DNAT\n"}
+	output, err := Manager{Runner: runner}.LiveRules(context.Background())
+	if err != nil || !strings.Contains(output, "Chain IPTUI_DNAT") {
+		t.Fatalf("output %q, err %v", output, err)
+	}
+	if runner.calls[0] != "iptables -t nat -L IPTUI_DNAT -n -v --line-numbers" {
+		t.Fatalf("ran %q", runner.calls[0])
+	}
+}

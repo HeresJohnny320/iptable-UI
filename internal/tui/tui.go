@@ -3,38 +3,29 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
+	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
 	"github.com/HeresJohnny320/iptable-ui/internal/system"
+	"github.com/HeresJohnny320/iptable-ui/internal/traffic"
+	"github.com/HeresJohnny320/iptable-ui/internal/web"
 	wgsetup "github.com/HeresJohnny320/iptable-ui/internal/wireguard"
+	"github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
 	"github.com/muesli/termenv"
 )
 
-var (
-	brandStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F2F7F3")).Background(lipgloss.Color("#176B4B")).Padding(0, 1)
-	sectionStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#75D6A3"))
-	mutedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#8B9A91"))
-	labelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#96A79C"))
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F5F8F5"))
-	publicStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5B85C"))
-	addressStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#61C7D4"))
-	portStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#81D69F"))
-	protocolStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#C5A7EF"))
-	enabledStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#66D494"))
-	disabledStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D9A36A"))
-	keyStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#12241A")).Background(lipgloss.Color("#80D6A5")).Padding(0, 1)
-	messageStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#F0D28A")).BorderLeft(true).BorderForeground(lipgloss.Color("#D9A64F")).PaddingLeft(1)
-	panelBorder   = lipgloss.RoundedBorder()
-)
+var panelBorder = lipgloss.RoundedBorder()
 
 type screen int
 
@@ -44,7 +35,59 @@ const (
 	wireGuardScreen
 	wireGuardResultScreen
 	helpScreen
+	backupScreen
+	liveScreen
 )
+
+type trafficLoaded traffic.Snapshot
+
+type liveLoaded struct {
+	output string
+	err    error
+}
+
+// BackupControl lists, creates and restores database backups.
+type BackupControl interface {
+	List() ([]backup.Info, error)
+	Create(context.Context, string) (backup.Info, bool, error)
+	Restore(context.Context, string) error
+	Path(string) (string, error)
+	Import(io.Reader) (backup.Info, error)
+	MoveTo(string) error
+	Folder() string
+}
+
+// menu is a short list of actions shown over the rule list: the actions for
+// one rule (ENTER) or the less common actions (M).
+type menu struct {
+	title  string
+	items  []menuItem
+	cursor int
+}
+
+// menuItem runs the same action as pressing key on the rule list.
+type menuItem struct {
+	key, label, hint string
+}
+
+// textPrompt is a one-line question at the bottom of the rule list.
+type textPrompt struct {
+	label  string
+	value  string
+	submit func(m *model, value string) tea.Cmd
+}
+
+const removeAllConfirmation = "REMOVE ALL"
+
+type backupsLoaded struct {
+	backups []backup.Info
+	err     error
+}
+
+type backupFinished struct {
+	message string
+	err     error
+}
 
 type WebControl interface {
 	Toggle() (bool, error)
@@ -52,6 +95,11 @@ type WebControl interface {
 	Address() string
 	Token() string
 	StatusText() string
+	Port() int
+	SetPort(int) (string, error)
+	DownloadLink(name string) (string, error)
+	URL() string
+	SignInURL() string
 }
 
 type WireGuardSetup interface {
@@ -70,12 +118,28 @@ type model struct {
 	wgSetup      WireGuardSetup
 	system       SystemControl
 	systemStatus *system.Status
+	backups      BackupControl
+	traffic      TrafficSource
+	trafficNow   traffic.Snapshot
+	settings     Settings
+	themeName    string
+	// simple shows plain sentences instead of the detailed codes and columns.
+	simple       bool
+	backupList   []backup.Info
+	backupCursor int
+	liveOutput   string
+	// reveal shows the web UI address and token unmasked.
+	reveal bool
+	// liveRaw shows the live firewall rules as plain iptables output.
+	liveRaw bool
 	// rules is what the list shows: allRules filtered by query.
 	rules    []store.Rule
 	allRules []store.Rule
 	query    string
 	// searching is true while the search line has keyboard focus.
 	searching    bool
+	prompt       *textPrompt
+	menu         *menu
 	cursor       int
 	selectedID   int64
 	listOffset   int
@@ -142,9 +206,53 @@ type rulesRefreshTick time.Time
 
 // Run shows the TUI until the user quits. It reports whether the user asked
 // to switch to whiptail mode instead.
-func Run(service app.Service, webControl WebControl, setup WireGuardSetup, host SystemControl, allowWhiptail bool) (bool, error) {
+// TrafficSource reports measured network speeds.
+type TrafficSource interface {
+	Snapshot() traffic.Snapshot
+}
+
+// Settings stores TUI preferences such as its look.
+type Settings interface {
+	Setting(context.Context, string) (string, error)
+	SetSetting(context.Context, string, string) error
+}
+
+// Options are what the TUI manages. A nil field turns its feature off.
+type Options struct {
+	Service       app.Service
+	Web           WebControl
+	WireGuard     WireGuardSetup
+	Host          SystemControl
+	Backups       BackupControl
+	Traffic       TrafficSource
+	Settings      Settings
+	AllowWhiptail bool
+}
+
+// themeSetting remembers the TUI look and viewSetting the detailed or
+// simple view, in the database.
+const (
+	themeSetting = "tui.theme"
+	viewSetting  = "tui.view"
+)
+
+func Run(options Options) (bool, error) {
 	lipgloss.SetColorProfile(colorProfile(lipgloss.ColorProfile(), os.Getenv, term.IsTerminal(os.Stdout.Fd())))
-	program := tea.NewProgram(model{service: service, webControl: webControl, wgSetup: setup, system: host, allowWhiptail: allowWhiptail}, tea.WithAltScreen())
+	theme := tuiThemes[0]
+	if options.Settings != nil {
+		if saved, err := options.Settings.Setting(context.Background(), themeSetting); err == nil {
+			theme = findTheme(saved)
+		}
+	}
+	applyTheme(theme)
+	simple := false
+	if options.Settings != nil {
+		if view, err := options.Settings.Setting(context.Background(), viewSetting); err == nil {
+			simple = view == "simple"
+		}
+	}
+	program := tea.NewProgram(model{service: options.Service, webControl: options.Web, wgSetup: options.WireGuard, system: options.Host, backups: options.Backups,
+		traffic: options.Traffic, settings: options.Settings, themeName: theme.name, simple: simple, allowWhiptail: options.AllowWhiptail}, tea.WithAltScreen())
 	final, err := program.Run()
 	if err != nil {
 		return false, err
@@ -172,7 +280,7 @@ func colorProfile(detected termenv.Profile, getenv func(string) string, tty bool
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.loadRules, m.loadSystem, scheduleRulesRefresh())
+	return tea.Batch(m.loadRules, m.loadSystem, m.loadTraffic, scheduleRulesRefresh())
 }
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -184,7 +292,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rulesRefreshTick:
 		if m.activeScreen == listScreen {
-			return m, tea.Batch(m.loadRules, m.loadSystem, scheduleRulesRefresh())
+			return m, tea.Batch(m.loadRules, m.loadSystem, m.loadTraffic, scheduleRulesRefresh())
 		}
 		return m, scheduleRulesRefresh()
 	case rulesLoaded:
@@ -232,14 +340,47 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeScreen = wireGuardResultScreen
 		m.scroll = 0
 		return m, nil
+	case trafficLoaded:
+		m.trafficNow = traffic.Snapshot(message)
+		return m, nil
+	case liveLoaded:
+		if message.err != nil {
+			m.message = message.err.Error()
+			return m, nil
+		}
+		m.liveOutput = message.output
+		if m.activeScreen != liveScreen {
+			m.activeScreen = liveScreen
+			m.scroll = 0
+		}
+		m.message = ""
+		return m, nil
+	case backupsLoaded:
+		if message.err != nil {
+			m.message = message.err.Error()
+			return m, nil
+		}
+		m.backupList = message.backups
+		m.backupCursor = min(m.backupCursor, max(0, len(m.backupList)-1))
+		return m, nil
+	case backupFinished:
+		if message.err != nil {
+			m.message = message.err.Error()
+		} else {
+			m.message = message.message
+		}
+		return m, tea.Batch(m.loadBackups, m.loadRules, m.loadSystem)
 	case tea.KeyMsg:
+		if m.activeScreen == backupScreen {
+			return m.updateBackups(message)
+		}
 		if m.activeScreen == addScreen {
 			return m.updateAdd(message)
 		}
 		if m.activeScreen == wireGuardScreen {
 			return m.updateWireGuard(message)
 		}
-		if m.activeScreen == wireGuardResultScreen || m.activeScreen == helpScreen {
+		if m.activeScreen == wireGuardResultScreen || m.activeScreen == helpScreen || m.activeScreen == liveScreen {
 			return m.updateResult(message)
 		}
 		return m.updateList(message)
@@ -262,6 +403,12 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.message = "Cancelled."
 		return m, nil
+	}
+	if m.prompt != nil {
+		return m.updatePrompt(key)
+	}
+	if m.menu != nil {
+		return m.updateMenu(key)
 	}
 	if m.searching {
 		if handled, quit := m.updateSearch(key); quit {
@@ -308,7 +455,7 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			m.message = err.Error()
 		} else if enabled {
-			m.message = "Web UI is ON at http://" + m.webControl.Address()
+			m.message = "Web UI is " + m.webControl.StatusText()
 		} else {
 			m.message = "Web UI is OFF. The session token remains valid only for this process."
 		}
@@ -321,6 +468,87 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filterRules()
 			m.message = "Search cleared."
 		}
+	case "p":
+		if m.webControl == nil {
+			m.message = "Web UI control is unavailable."
+			break
+		}
+		m.prompt = &textPrompt{label: "Web UI port (saved for next time)", value: strconv.Itoa(m.webControl.Port()), submit: submitPort}
+		m.message = ""
+	case "x":
+		total := len(m.allRulesOrShown())
+		if total == 0 {
+			m.message = "There are no rules to remove."
+			break
+		}
+		m.prompt = &textPrompt{label: fmt.Sprintf("Remove all %d rules? A backup is taken first. Type %s", total, removeAllConfirmation), submit: submitRemoveAll}
+		m.message = ""
+	case "s":
+		if m.backups == nil {
+			m.message = "Backups are unavailable."
+			break
+		}
+		m.activeScreen = backupScreen
+		m.backupCursor = 0
+		m.message = ""
+		return m, m.loadBackups
+	case "enter":
+		if len(m.rules) > 0 {
+			m.menu = m.ruleMenu(m.rules[m.cursor])
+			m.message = ""
+		}
+	case "m":
+		m.menu = m.moreMenu()
+		m.message = ""
+	case "l":
+		m.message = "Reading the firewall..."
+		return m, m.loadLive
+	case "n":
+		m.simple = !m.simple
+		view, message := "detailed", "Detailed view: interface names, codes and columns. Press N for the simple view."
+		if m.simple {
+			view, message = "simple", "Simple view: plain words, fewer details. Press N for the detailed view."
+		}
+		m.message = message
+		m.keepCursorVisible()
+		if m.settings != nil {
+			settings := m.settings
+			return m, func() tea.Msg {
+				if err := settings.SetSetting(context.Background(), viewSetting, view); err != nil {
+					return actionFinished{err: fmt.Errorf("the view changed but could not be saved: %w", err)}
+				}
+				return nil
+			}
+		}
+	case "o":
+		theme := nextTheme(m.themeName)
+		applyTheme(theme)
+		m.themeName = theme.name
+		m.message = fmt.Sprintf("TUI look: %s. Press O again for the next look.", theme.label)
+		if m.settings != nil {
+			settings := m.settings
+			return m, func() tea.Msg {
+				if err := settings.SetSetting(context.Background(), themeSetting, theme.name); err != nil {
+					return actionFinished{err: fmt.Errorf("the look changed but could not be saved: %w", err)}
+				}
+				return nil
+			}
+		}
+	case "v":
+		if m.webControl == nil {
+			break
+		}
+		m.reveal = !m.reveal
+		m.message = "Web address and token are hidden again."
+		if m.reveal {
+			m.message = "Web address and token are shown. Press V to hide them again."
+		}
+	case "c":
+		if m.webControl == nil {
+			break
+		}
+		copyToClipboard(m.webControl.SignInURL())
+		m.message = "Sign-in link copied to your clipboard (in terminals that support it, like Windows Terminal or iTerm2; in PuTTY press V to show it and select it)."
 	case "?", "h":
 		m.activeScreen = helpScreen
 		m.scroll = 0
@@ -419,8 +647,121 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) loadBackups() tea.Msg {
+	if m.backups == nil {
+		return nil
+	}
+	backups, err := m.backups.List()
+	return backupsLoaded{backups: backups, err: err}
+}
+
+func (m model) updateBackups(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.prompt != nil {
+		return m.updatePrompt(key)
+	}
+	if m.confirm != nil {
+		pending := m.confirm
+		m.confirm = nil
+		if keyName(key) != "y" {
+			m.message = "Cancelled."
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			notice, err := pending.action(context.Background())
+			return backupFinished{message: withNotice(pending.success, notice), err: err}
+		}
+	}
+	switch keyName(key) {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "q":
+		m.activeScreen = listScreen
+		m.message = ""
+	case "up", "k":
+		m.backupCursor = max(0, m.backupCursor-1)
+	case "down", "j":
+		m.backupCursor = min(max(0, len(m.backupList)-1), m.backupCursor+1)
+	case "d":
+		if len(m.backupList) == 0 {
+			break
+		}
+		chosen := m.backupList[m.backupCursor]
+		path, err := m.backups.Path(chosen.Name)
+		if err != nil {
+			m.message = err.Error()
+			break
+		}
+		copyHint := fmt.Sprintf("Copy it with: scp root@<this-server>:%s .", path)
+		if m.webControl == nil || !m.webControl.Enabled() {
+			m.message = "Turn on the web UI (W) to get a download link. " + copyHint
+			break
+		}
+		link, err := m.webControl.DownloadLink(chosen.Name)
+		if err != nil {
+			m.message = err.Error() + ". " + copyHint
+			break
+		}
+		m.message = fmt.Sprintf("Download link (works for %d minutes, no sign-in needed): %s  %s", int(web.LinkLifetime.Minutes()), link, copyHint)
+	case "i":
+		m.prompt = &textPrompt{label: "Import a backup file on this server (full path)", submit: submitImport}
+		m.message = ""
+	case "o":
+		m.prompt = &textPrompt{label: "Backup folder", value: m.backups.Folder(), submit: submitFolder}
+		m.message = ""
+	case "n":
+		m.message = "Backing up..."
+		return m, func() tea.Msg {
+			info, _, err := m.backups.Create(context.Background(), backup.Manual)
+			return backupFinished{message: fmt.Sprintf("Backup saved (%d rules).", info.Rules), err: err}
+		}
+	case "enter", "r":
+		if len(m.backupList) == 0 {
+			break
+		}
+		chosen := m.backupList[m.backupCursor]
+		when := chosen.Time.Local().Format("2006-01-02 15:04:05")
+		m.confirm = &pendingAction{
+			success: fmt.Sprintf("Restored the backup from %s; the firewall now matches it", when),
+			action: func(ctx context.Context) (string, error) {
+				return "", m.backups.Restore(ctx, chosen.Name)
+			},
+		}
+		m.message = fmt.Sprintf("Restore the backup from %s? All %d current rules are replaced by its %d and applied now (the current state is backed up first). Press y to confirm, any other key to cancel.", when, len(m.allRulesOrShown()), chosen.Rules)
+	}
+	return m, nil
+}
+
+// allRulesOrShown is every saved rule, even when a search filters the list.
+func (m model) allRulesOrShown() []store.Rule {
+	if m.allRules != nil {
+		return m.allRules
+	}
+	return m.rules
+}
+
+func (m model) loadTraffic() tea.Msg {
+	if m.traffic == nil {
+		return nil
+	}
+	return trafficLoaded(m.traffic.Snapshot())
+}
+
+func (m model) loadLive() tea.Msg {
+	output, err := m.service.LiveRules(context.Background())
+	return liveLoaded{output: output, err: err}
+}
+
 func (m model) updateResult(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch keyName(key) {
+	case "r":
+		if m.activeScreen == liveScreen {
+			return m, m.loadLive
+		}
+	case "t":
+		if m.activeScreen == liveScreen {
+			m.liveRaw = !m.liveRaw
+			m.scroll = 0
+		}
 	case "esc", "enter", "q", "?", "h":
 		m.activeScreen = listScreen
 	case "up", "k":
@@ -591,6 +932,221 @@ func (m *model) selectRule(index int) {
 	}
 	m.cursor = min(max(0, index), len(m.rules)-1)
 	m.selectedID = m.rules[m.cursor].ID
+}
+
+func (m model) ruleMenu(rule store.Rule) *menu {
+	toggle, clientIP := "Turn off", "Pass the real client IP"
+	if !rule.Enabled {
+		toggle = "Turn on"
+	}
+	if rule.KeepClientIP {
+		clientIP = "Mask the client IP again"
+	}
+	return &menu{
+		title: fmt.Sprintf("Rule #%d  %s  :%d -> %s:%d %s%s", rule.ID, ruleLabel(rule.Name), rule.PublicPort, rule.DestIP, rule.DestPort, strings.ToUpper(rule.Protocol), m.ruleSpeed(rule)),
+		items: []menuItem{
+			{"e", "Edit", "change its ports, address or protocol"},
+			{"t", toggle, "applies right away"},
+			{"i", clientIP, "what the server sees as the visitor's address"},
+			{"d", "Remove", "asks first"},
+		},
+	}
+}
+
+func (m model) moreMenu() *menu {
+	items := make([]menuItem, 0, 9)
+	if len(m.rules) > 0 {
+		items = append(items, menuItem{"i", "Real client IP for the selected rule", "show visitors' real addresses to the server"})
+	}
+	items = append(items,
+		menuItem{"r", "Re-apply rules", "rebuild the firewall if another tool wiped it"},
+		menuItem{"l", "Live firewall rules", "what iptables is forwarding right now"})
+	if m.system != nil && m.systemStatus != nil {
+		items = append(items,
+			menuItem{"f", "IPv4 forwarding: turn " + offOn(m.systemStatus.Forwarding), "must be on for forwards to work"},
+			menuItem{"b", "Apply on boot: turn " + offOn(m.systemStatus.BootRestore), "bring rules back after a reboot"},
+		)
+	}
+	if m.backups != nil {
+		items = append(items, menuItem{"s", "Backups", "back up, download or restore"})
+	}
+	if m.webControl != nil {
+		items = append(items,
+			menuItem{"c", "Copy web sign-in link", "to your clipboard, signs you in when opened"},
+			menuItem{"v", map[bool]string{true: "Hide", false: "Show"}[m.reveal] + " web address and token", "they are masked on screen by default"},
+			menuItem{"p", "Web UI port", "move the web UI to another port"},
+		)
+	}
+	items = append(items, menuItem{"x", "Remove all rules", "type REMOVE ALL to confirm; backed up first"})
+	// WireGuard setup only matters when WireGuard is the VPN, or none is up.
+	if m.systemStatus == nil || m.systemStatus.VPNKind == "WireGuard" || !m.systemStatus.VPNUp {
+		items = append(items, menuItem{"g", "WireGuard setup", "create a tunnel config for this VPS"})
+	}
+	items = append(items,
+		menuItem{"n", map[bool]string{true: "Detailed view", false: "Simple view"}[m.simple], map[bool]string{true: "show interface names, codes and columns", false: "plain words, fewer details"}[m.simple]},
+		menuItem{"o", fmt.Sprintf("TUI look: %s (next: %s)", findTheme(m.themeName).label, nextTheme(m.themeName).label), "colors and contrast, saved for next time"},
+		menuItem{"u", "Whiptail look", "classic blue menus"})
+	return &menu{title: "More actions", items: items}
+}
+
+// copyToClipboard puts text on the user's local clipboard with the OSC 52
+// terminal sequence, which also works over SSH. Inside tmux or screen the
+// sequence is wrapped so it reaches the outer terminal.
+func copyToClipboard(text string) {
+	sequence := osc52.New(text)
+	switch {
+	case os.Getenv("TMUX") != "":
+		sequence = sequence.Tmux()
+	case strings.HasPrefix(os.Getenv("TERM"), "screen"):
+		sequence = sequence.Screen()
+	}
+	_, _ = sequence.WriteTo(os.Stderr)
+}
+
+// ruleSpeed is " ▼ 1.2 KB/s ▲ 300 KB/s" for an enabled rule with measured
+// traffic: ▼ flows to your server, ▲ back to visitors.
+func (m model) ruleSpeed(rule store.Rule) string {
+	if !rule.Enabled {
+		return ""
+	}
+	rate, ok := m.trafficNow.ForwardRate(rule.PublicPort, rule.Protocol, rule.DestIP)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("  ▼ %s ▲ %s", traffic.FormatRate(rate.InPerSecond), traffic.FormatRate(rate.OutPerSecond))
+}
+
+// offOn names the state a toggle switches to.
+func offOn(currentlyOn bool) string {
+	if currentlyOn {
+		return "off"
+	}
+	return "on"
+}
+
+// updateMenu moves through a menu; ENTER or an item's letter runs it, as if
+// that letter were pressed on the rule list.
+func (m model) updateMenu(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	current := *m.menu
+	name := keyName(key)
+	switch name {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "q", "m":
+		m.menu = nil
+		return m, nil
+	case "up", "k":
+		current.cursor = max(0, current.cursor-1)
+		m.menu = &current
+		return m, nil
+	case "down", "j":
+		current.cursor = min(len(current.items)-1, current.cursor+1)
+		m.menu = &current
+		return m, nil
+	case "enter":
+		name = current.items[current.cursor].key
+	}
+	for _, item := range current.items {
+		if item.key == name {
+			m.menu = nil
+			return m.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(item.key)})
+		}
+	}
+	return m, nil
+}
+
+func (m model) updatePrompt(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.prompt = nil
+		m.message = "Cancelled."
+	case tea.KeyEnter:
+		prompt := *m.prompt
+		m.prompt = nil
+		return m, prompt.submit(&m, strings.TrimSpace(prompt.value))
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if runes := []rune(m.prompt.value); len(runes) > 0 {
+			m.prompt = &textPrompt{label: m.prompt.label, value: string(runes[:len(runes)-1]), submit: m.prompt.submit}
+		}
+	case tea.KeySpace:
+		m.prompt = &textPrompt{label: m.prompt.label, value: m.prompt.value + " ", submit: m.prompt.submit}
+	case tea.KeyRunes:
+		m.prompt = &textPrompt{label: m.prompt.label, value: m.prompt.value + string(key.Runes), submit: m.prompt.submit}
+	}
+	return m, nil
+}
+
+func submitPort(m *model, value string) tea.Cmd {
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		m.message = "Port must be a number from 1 to 65535."
+		return nil
+	}
+	if port == m.webControl.Port() {
+		m.message = fmt.Sprintf("The web UI already uses port %d.", port)
+		return nil
+	}
+	m.message = fmt.Sprintf("Moving the web UI to port %d...", port)
+	web := m.webControl
+	return func() tea.Msg {
+		url, err := web.SetPort(port)
+		if err != nil && url == "" {
+			return actionFinished{err: err}
+		}
+		message := fmt.Sprintf("Web UI port is now %d (saved for next time)", port)
+		if web.Enabled() {
+			message = fmt.Sprintf("Web UI moved to %s (saved for next time)", url)
+		}
+		if err != nil {
+			message += ". " + err.Error()
+		}
+		return actionFinished{message: message}
+	}
+}
+
+func submitImport(m *model, value string) tea.Cmd {
+	if value == "" {
+		m.message = "No file given."
+		return nil
+	}
+	backups := m.backups
+	m.message = "Importing..."
+	return func() tea.Msg {
+		file, err := os.Open(value)
+		if err != nil {
+			return backupFinished{err: fmt.Errorf("open %s: %w", value, err)}
+		}
+		defer file.Close()
+		info, err := backups.Import(file)
+		return backupFinished{message: fmt.Sprintf("Imported %s (%d rules). It is at the top of the list; press ENTER on it to restore", filepath.Base(value), info.Rules), err: err}
+	}
+}
+
+func submitFolder(m *model, value string) tea.Cmd {
+	backups := m.backups
+	m.message = "Moving backups..."
+	return func() tea.Msg {
+		if err := backups.MoveTo(value); err != nil {
+			return backupFinished{err: err}
+		}
+		return backupFinished{message: "Backups are now saved in " + backups.Folder()}
+	}
+}
+
+func submitRemoveAll(m *model, value string) tea.Cmd {
+	if value != removeAllConfirmation {
+		m.message = fmt.Sprintf("Nothing was removed: you must type %s exactly.", removeAllConfirmation)
+		return nil
+	}
+	m.message = "Removing all rules..."
+	service := m.service
+	return func() tea.Msg {
+		removed, notice, err := service.DeleteAll(context.Background())
+		message := fmt.Sprintf("Removed %d rule(s). A backup was taken first: restore it with S to undo", removed)
+		return actionFinished{message: withNotice(message, notice), err: err}
+	}
 }
 
 // updateSearch edits the search line. Up and Down are not handled, so the

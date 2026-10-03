@@ -151,3 +151,146 @@ func TestRuleMatchesSearch(t *testing.T) {
 		}
 	}
 }
+
+func TestSettingsBackupAndReplaceAll(t *testing.T) {
+	directory := t.TempDir()
+	database, err := Open(filepath.Join(directory, "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if value, err := database.Setting(ctx, "theme"); err != nil || value != "" {
+		t.Fatalf("unset setting should be empty: %q, %v", value, err)
+	}
+	if err := database.SetSetting(ctx, "theme", "ocean"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetSetting(ctx, "theme", "midnight"); err != nil {
+		t.Fatal(err)
+	}
+	original, err := database.Add(ctx, Rule{Name: "keep", PublicPort: 80, DestIP: "10.0.0.2", DestPort: 80, Protocol: "tcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := filepath.Join(directory, "snapshot.db")
+	if err := database.Backup(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Add(ctx, Rule{PublicPort: 443, DestIP: "10.0.0.3", DestPort: 443, Protocol: "tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetSetting(ctx, "theme", "light"); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := Open(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, _ := backup.List(ctx)
+	settings, _ := backup.Settings(ctx)
+	backup.Close()
+	if len(rules) != 1 || settings["theme"] != "midnight" {
+		t.Fatalf("snapshot should hold the earlier state: %+v %v", rules, settings)
+	}
+
+	if err := database.ReplaceAll(ctx, rules, settings); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := database.List(ctx)
+	theme, _ := database.Setting(ctx, "theme")
+	if len(restored) != 1 || restored[0].ID != original.ID || restored[0].Name != "keep" || !restored[0].CreatedAt.Equal(original.CreatedAt) || theme != "midnight" {
+		t.Fatalf("restore should bring back the snapshot exactly: %+v theme=%q", restored, theme)
+	}
+	if err := database.ReplaceAll(ctx, []Rule{{ID: 9, PublicPort: 0, DestIP: "x", Protocol: "tcp"}}, nil); err == nil {
+		t.Fatal("an invalid rule in a backup must be rejected")
+	}
+	if after, _ := database.List(ctx); len(after) != 1 {
+		t.Fatal("a rejected restore must leave the database unchanged")
+	}
+}
+
+func TestDeleteAll(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	for _, port := range []uint16{80, 443} {
+		if _, err := database.Add(ctx, Rule{PublicPort: port, DestIP: "10.0.0.2", DestPort: port, Protocol: "tcp"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = database.SetSetting(ctx, "web.theme", "ocean")
+	removed, err := database.DeleteAll(ctx)
+	if err != nil || len(removed) != 2 {
+		t.Fatalf("removed %d, err %v", len(removed), err)
+	}
+	if rules, _ := database.List(ctx); len(rules) != 0 {
+		t.Fatalf("rules left: %+v", rules)
+	}
+	if theme, _ := database.Setting(ctx, "web.theme"); theme != "ocean" {
+		t.Fatal("removing rules must keep settings")
+	}
+}
+
+func TestCombineProtocols(t *testing.T) {
+	rules := CombineProtocols([]Rule{
+		{PublicPort: 25565, DestIP: "10.66.0.2", DestPort: 25565, Protocol: "tcp", Name: importedName},
+		{PublicPort: 25565, DestIP: "10.66.0.2", DestPort: 25565, Protocol: "udp", Name: "Minecraft"},
+		{PublicPort: 8080, DestIP: "10.66.0.3", DestPort: 80, Protocol: "tcp"},
+		{PublicPort: 53, DestIP: "10.66.0.4", DestPort: 53, Protocol: "udp"},
+		{PublicPort: 53, DestIP: "10.66.0.5", DestPort: 53, Protocol: "tcp"}, // different destination
+	})
+	if len(rules) != 4 || rules[0].Protocol != "both" || rules[0].Name != "Minecraft" {
+		t.Fatalf("expected the 25565 pair combined and named, got %+v", rules)
+	}
+	for _, rule := range rules[1:] {
+		if rule.Protocol == "both" {
+			t.Fatalf("only matching pairs may be combined: %+v", rules)
+		}
+	}
+}
+
+func TestMergeProtocolPairs(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	add := func(rule Rule) Rule {
+		added, err := database.Add(ctx, rule)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return added
+	}
+	tcp := add(Rule{Name: importedName, PublicPort: 25565, DestIP: "10.66.0.2", DestPort: 25565, Protocol: "tcp"})
+	add(Rule{Name: "Minecraft", PublicPort: 25565, DestIP: "10.66.0.2", DestPort: 25565, Protocol: "udp"})
+	add(Rule{PublicPort: 8080, DestIP: "10.66.0.3", DestPort: 80, Protocol: "tcp"})
+	differs := add(Rule{PublicPort: 53, DestIP: "10.66.0.4", DestPort: 53, Protocol: "tcp"})
+	add(Rule{PublicPort: 53, DestIP: "10.66.0.4", DestPort: 53, Protocol: "udp"})
+	if err := database.SetEnabled(ctx, differs.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := database.MergeProtocolPairs(ctx)
+	if err != nil || merged != 1 {
+		t.Fatalf("merged %d, err %v", merged, err)
+	}
+	rules, _ := database.List(ctx)
+	if len(rules) != 4 {
+		t.Fatalf("expected 4 rules left, got %+v", rules)
+	}
+	for _, rule := range rules {
+		if rule.PublicPort == 25565 && (rule.ID != tcp.ID || rule.Protocol != "both" || rule.Name != "Minecraft") {
+			t.Fatalf("pair should become one 'both' rule with the older ID and the real name: %+v", rule)
+		}
+	}
+	if again, _ := database.MergeProtocolPairs(ctx); again != 0 {
+		t.Fatal("merging twice must change nothing")
+	}
+}

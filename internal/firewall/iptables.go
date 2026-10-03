@@ -515,6 +515,22 @@ func (m Manager) ruleCommands(rule store.Rule, protocol string) []tableCommand {
 	return commands
 }
 
+// LiveRulesCommand is what LiveRules runs, shown to the user alongside the output.
+var LiveRulesCommand = []string{"iptables", "-t", "nat", "-L", dnatChain, "-n", "-v", "--line-numbers"}
+
+// LiveRules returns the port forwards as the kernel has them right now, with
+// packet and byte counters.
+func (m Manager) LiveRules(ctx context.Context) (string, error) {
+	if m.Runner == nil {
+		return "", errors.New("firewall command runner is not configured")
+	}
+	output, err := m.Runner.Run(ctx, LiveRulesCommand...)
+	if err != nil {
+		return "", fmt.Errorf("read live firewall rules (has iptable-ui applied its rules yet?): %w", err)
+	}
+	return string(output), nil
+}
+
 // Disconnect closes tracked connections for a forward so a removed or
 // changed rule stops passing traffic at once, not when its clients go idle.
 // It returns how many connections were closed.

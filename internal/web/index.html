@@ -6,23 +6,36 @@
   <meta name="color-scheme" content="light dark">
   <title>iptable-ui | Port forwards</title>
   <script>
+    // Paint with the last theme this browser saw; the saved choice is loaded
+    // from the server after sign-in.
     (() => {
-      let saved = null;
-      try { saved = localStorage.getItem('iptable-ui-theme'); } catch (_) {}
-      const preferred = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      document.documentElement.dataset.theme = saved || preferred;
+      let choice = 'system';
+      try { choice = localStorage.getItem('iptable-ui-theme') || 'system'; } catch (_) {}
+      const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = choice === 'system' ? (dark ? 'dark' : 'light') : choice;
     })();
   </script>
   <style>
     :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; color: var(--text); background: var(--page); --text: #17231f; --page: #eef2ed; --green: #176b4b; --line: #d6ded7; --muted: #66756d; --surface: #f8faf6; --surface-strong: #fbfcf9; --input: #fff; --input-line: #c7d1c9; --bar: #17352b; --bar-line: #8bb29b; --bar-text: #f7fbf7; --bar-muted: #c6d7ca; --notice-bg: #fff8eb; --notice-text: #613e20; --notice-line: #ae6829; --enabled: #246044; --disabled: #7b6250; --row-line: #dfe5df; --table-top: #315745; --form-top: #a6b6aa; }
-    :root[data-theme="dark"] { color-scheme: dark; --text: #e2e9e3; --page: #151d19; --green: #56b487; --line: #394940; --muted: #a6b5aa; --surface: #202b25; --surface-strong: #29362f; --input: #17211c; --input-line: #506257; --bar: #101a15; --bar-line: #47745d; --bar-text: #edf5ef; --bar-muted: #b0c8b8; --notice-bg: #352a1b; --notice-text: #f1d4a5; --notice-line: #d2954f; --enabled: #7ed3a2; --disabled: #d6ad7e; --row-line: #344239; --table-top: #57916f; --form-top: #50685a; }
+    :root { --on-accent: #fff; --danger: #9d3933; --dot-on: #3e9b65; }
+    :root[data-theme="dark"] { color-scheme: dark; --on-accent: #102018; --danger: #f08b81; --text: #e2e9e3; --page: #151d19; --green: #56b487; --line: #394940; --muted: #a6b5aa; --surface: #202b25; --surface-strong: #29362f; --input: #17211c; --input-line: #506257; --bar: #101a15; --bar-line: #47745d; --bar-text: #edf5ef; --bar-muted: #b0c8b8; --notice-bg: #352a1b; --notice-text: #f1d4a5; --notice-line: #d2954f; --enabled: #7ed3a2; --disabled: #d6ad7e; --row-line: #344239; --table-top: #57916f; --form-top: #50685a; }
+    :root[data-theme="ocean"] { color-scheme: light; --text: #14202b; --page: #eaf1f7; --green: #1f5f99; --line: #d0dbe6; --muted: #5c6b7a; --surface: #f6f9fc; --surface-strong: #fbfdff; --input: #fff; --input-line: #c3d0dd; --bar: #12324f; --bar-line: #6f9ccc; --bar-text: #f4f8fc; --bar-muted: #bcd0e4; --notice-bg: #fff6e6; --notice-text: #5f3d12; --notice-line: #b5751f; --enabled: #1f6b48; --disabled: #8a5a2b; --row-line: #dbe4ed; --table-top: #2a5d8f; --form-top: #9fb5cb; }
+    :root[data-theme="midnight"] { color-scheme: dark; --text: #e4e6f2; --page: #12131f; --green: #8a93ff; --line: #2f3352; --muted: #a2a7c4; --surface: #1b1d2e; --surface-strong: #23263b; --input: #151726; --input-line: #44496e; --bar: #0c0d17; --bar-line: #5a62c9; --bar-text: #eef0ff; --bar-muted: #b3b8dd; --notice-bg: #2e2738; --notice-text: #f1d6a8; --notice-line: #c99a4f; --enabled: #7fd6a8; --disabled: #e0b27e; --row-line: #2a2d47; --table-top: #6b73e0; --form-top: #444a75; --on-accent: #0c0d17; --danger: #ff9a9a; --dot-on: #7fd6a8; }
+    :root[data-theme="sunset"] { color-scheme: light; --text: #2a1d17; --page: #f7eee8; --green: #b4532a; --line: #e6d5ca; --muted: #7a6458; --surface: #fcf6f2; --surface-strong: #fffaf7; --input: #fff; --input-line: #dcc6b8; --bar: #3b2219; --bar-line: #d98a5f; --bar-text: #fff6f0; --bar-muted: #e8c9b8; --notice-bg: #fff3dd; --notice-text: #613e20; --notice-line: #ae6829; --enabled: #2f6e44; --disabled: #9b4f2c; --row-line: #ecdcd2; --table-top: #a24a25; --form-top: #d5b7a5; }
+    :root[data-theme="contrast"] { color-scheme: dark; --text: #fff; --page: #000; --green: #ffd400; --line: #fff; --muted: #e6e6e6; --surface: #000; --surface-strong: #111; --input: #000; --input-line: #fff; --bar: #000; --bar-line: #ffd400; --bar-text: #fff; --bar-muted: #fff; --notice-bg: #000; --notice-text: #ffd400; --notice-line: #ffd400; --enabled: #5cff8a; --disabled: #ffb070; --row-line: #888; --table-top: #ffd400; --form-top: #fff; --on-accent: #000; --danger: #ff8080; --dot-on: #5cff8a; }
+    :root[data-theme="nord"] { color-scheme: dark; --text: #e5e9f0; --page: #2e3440; --green: #88c0d0; --line: #434c5e; --muted: #a9b3c4; --surface: #3b4252; --surface-strong: #434c5e; --input: #2e3440; --input-line: #4c566a; --bar: #242933; --bar-line: #81a1c1; --bar-text: #eceff4; --bar-muted: #c0c8d6; --notice-bg: #3f3a33; --notice-text: #ebcb8b; --notice-line: #d08770; --enabled: #a3be8c; --disabled: #d08770; --row-line: #434c5e; --table-top: #88c0d0; --form-top: #4c566a; --on-accent: #2e3440; --danger: #e5878f; --dot-on: #a3be8c; }
+    :root[data-theme="dracula"] { color-scheme: dark; --text: #f8f8f2; --page: #282a36; --green: #bd93f9; --line: #44475a; --muted: #b3b6d1; --surface: #303241; --surface-strong: #383a4a; --input: #21222c; --input-line: #565a73; --bar: #1e1f29; --bar-line: #ff79c6; --bar-text: #f8f8f2; --bar-muted: #c9c9e0; --notice-bg: #3a3245; --notice-text: #f1fa8c; --notice-line: #ffb86c; --enabled: #50fa7b; --disabled: #ffb86c; --row-line: #3c3f52; --table-top: #bd93f9; --form-top: #565a73; --on-accent: #21222c; --danger: #ff6e6e; --dot-on: #50fa7b; }
+    :root[data-theme="solarized"] { color-scheme: light; --text: #073642; --page: #fdf6e3; --green: #1f75b5; --line: #e3dcc6; --muted: #586e75; --surface: #fefaf0; --surface-strong: #fffdf6; --input: #fff; --input-line: #d6cfb8; --bar: #002b36; --bar-line: #2aa198; --bar-text: #fdf6e3; --bar-muted: #93a1a1; --notice-bg: #fbefd0; --notice-text: #6b4a00; --notice-line: #b58900; --enabled: #4f6f00; --disabled: #a14a16; --row-line: #eee8d5; --table-top: #268bd2; --form-top: #c9c2ab; --on-accent: #fff; --danger: #c22f2c; --dot-on: #859900; }
+    :root[data-theme="gruvbox"] { color-scheme: dark; --text: #ebdbb2; --page: #282828; --green: #fabd2f; --line: #3c3836; --muted: #bdae93; --surface: #32302f; --surface-strong: #3c3836; --input: #1d2021; --input-line: #504945; --bar: #1d2021; --bar-line: #fe8019; --bar-text: #fbf1c7; --bar-muted: #d5c4a1; --notice-bg: #3c3226; --notice-text: #fabd2f; --notice-line: #fe8019; --enabled: #b8bb26; --disabled: #fe8019; --row-line: #3c3836; --table-top: #fabd2f; --form-top: #504945; --on-accent: #1d2021; --danger: #fb6a5a; --dot-on: #b8bb26; }
+    :root[data-theme="rose"] { color-scheme: light; --text: #2b1b22; --page: #fbeff2; --green: #b83b6b; --line: #efd3dc; --muted: #7d5e69; --surface: #fdf6f8; --surface-strong: #fffafb; --input: #fff; --input-line: #e6c4cf; --bar: #3a1a28; --bar-line: #e27fa3; --bar-text: #fff3f7; --bar-muted: #e9c2d1; --notice-bg: #fff1e0; --notice-text: #6a3d12; --notice-line: #c07a2c; --enabled: #2f7a4f; --disabled: #a8572e; --row-line: #f3dfe5; --table-top: #b83b6b; --form-top: #e1bccb; --on-accent: #fff; --danger: #b42335; --dot-on: #3e9b65; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; color: var(--text); background: linear-gradient(140deg, var(--page), var(--surface) 52%, var(--page)); }
     button, input, select { font: inherit; }
     button { cursor: pointer; }
     .bar { min-height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; color: var(--bar-text); background: var(--bar); border-bottom: 3px solid var(--bar-line); }
     .bar-controls { display: flex; align-items: center; gap: 14px; }
-    .theme-toggle { border: 1px solid #668576; border-radius: 4px; padding: 7px 10px; color: var(--bar-text); background: transparent; }
+    .theme-picker { display: flex; align-items: center; gap: 8px; color: var(--bar-muted); font-size: 13px; }
+    .theme-toggle { min-height: 36px; border: 1px solid var(--bar-line); border-radius: 4px; padding: 6px 8px; color: var(--bar-text); background: var(--bar); width: auto; }
     .theme-toggle:hover { background: rgba(255,255,255,.08); }
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; letter-spacing: .02em; }
     .mark { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #b9d4c1; color: #d7f1dc; font-size: 12px; }
@@ -33,8 +46,7 @@
     .sub { color: var(--muted); margin: 7px 0 0; font-size: 14px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .button { min-height: 42px; border: 1px solid var(--line); border-radius: 4px; padding: 10px 15px; color: var(--text); background: var(--surface-strong); }
-    .button.primary { color: white; background: var(--green); border-color: var(--green); }
-    :root[data-theme="dark"] .button.primary { color: #102018; }
+    .button.primary { color: var(--on-accent); background: var(--green); border-color: var(--green); }
     .button:hover { filter: brightness(.96); }
     .host { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin-top: 18px; background: var(--line); border-top: 2px solid var(--table-top); }
     .host[hidden] { display: none; }
@@ -55,6 +67,37 @@
     .search-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
     .search-row input { flex: 1; min-width: 0; }
     .search-count { color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .traffic-bar { margin: 10px 0 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+    .traffic-bar strong { color: var(--text); }
+    .rate { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .rate.busy { color: var(--enabled); }
+    .summary { margin: -4px 0 12px; color: var(--muted); font-size: 13px; }
+    .summary strong { color: var(--text); }
+    .backup-list { width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 14px; }
+    .backup-list td { padding: 9px 8px; border-bottom: 1px solid var(--row-line); white-space: normal; }
+    .backup-list td:last-child { text-align: right; }
+    .backup-kind { display: inline-block; padding: 2px 7px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 12px; }
+    .folder-row { max-width: 620px; grid-template-columns: minmax(0, 1fr) auto; display: grid; align-items: end; gap: 10px; margin-top: 18px; }
+    .live-output { margin: 12px 0 0; padding: 12px; overflow-x: auto; background: var(--input); border: 1px solid var(--line); color: var(--text); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+    .live-output:empty { display: none; }
+    .live-table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .live-table th { padding: 8px; color: var(--muted); font-size: 11px; font-weight: 700; text-align: left; text-transform: uppercase; letter-spacing: .08em; border-bottom: 1px solid var(--line); }
+    .live-table td { padding: 9px 8px; border-bottom: 1px solid var(--row-line); white-space: nowrap; }
+    .live-table .num { color: var(--muted); }
+    .live-table .proto { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; text-transform: uppercase; }
+    .live-table .port { color: var(--disabled); font-weight: 700; }
+    .live-table .to { color: var(--green); font-weight: 700; }
+    .live-table .counter { text-align: right; color: var(--muted); }
+    .live-table th.counter { color: var(--muted); }
+    .live-table tr.active .counter { color: var(--enabled); font-weight: 700; }
+    .live-raw { margin-top: 12px; }
+    .live-raw summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+    #live-panel .setup-body { max-width: none; }
+    .port-row { max-width: 360px; grid-template-columns: minmax(0, 1fr) auto; display: grid; align-items: end; gap: 10px; }
+    .danger-zone { margin-top: 22px; padding: 14px 16px; border: 1px solid var(--danger); border-radius: 4px; }
+    .danger-zone h3 { margin: 0 0 4px; color: var(--danger); font-family: Georgia, serif; font-size: 18px; font-weight: 500; }
+    .button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+    .backup-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
     .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .table-wrap { overflow-x: auto; border-top: 2px solid var(--table-top); background: var(--surface); container-type: inline-size; }
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
@@ -62,7 +105,7 @@
     td { padding: 12px; border-bottom: 1px solid var(--row-line); white-space: nowrap; }
     .route { font-variant-numeric: tabular-nums; }
     .state { display: inline-flex; align-items: center; gap: 7px; color: var(--enabled); }
-    .state::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #3e9b65; }
+    .state::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--dot-on); }
     .state.off { color: var(--disabled); }
     .state.off::before { background: #b78b61; }
     .row-action { border: 0; background: transparent; color: var(--green); text-decoration: underline; text-underline-offset: 3px; padding: 5px; }
@@ -75,9 +118,8 @@
     .actions-cell { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
     .action-button { min-height: 42px; border: 1px solid var(--line); border-radius: 4px; padding: 8px 11px; color: var(--text); background: var(--surface-strong); font-size: 13px; font-weight: 600; white-space: nowrap; }
     .action-button:hover { border-color: var(--green); color: var(--green); }
-    .action-button.remove { color: #9d3933; }
+    .action-button.remove { color: var(--danger); }
     .action-button:disabled { opacity: .6; cursor: wait; }
-    :root[data-theme="dark"] .action-button.remove { color: #f08b81; }
     .action-button:focus-visible, .button:focus-visible, .theme-toggle:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
     .empty { padding: 34px 16px; color: var(--muted); text-align: center; }
     .form { padding: 17px; background: var(--surface); border-top: 2px solid var(--form-top); }
@@ -149,18 +191,19 @@
   </style>
 </head>
 <body>
-  <header class="bar"><div class="brand"><span class="mark">IP</span> iptable-ui <small>WIREGUARD GATEWAY</small></div><div class="bar-controls"><button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">Dark mode</button><small id="connection">AUTHENTICATED SESSION</small></div></header>
+  <header class="bar"><div class="brand"><span class="mark">IP</span> iptable-ui <small id="brand-kind">VPN GATEWAY</small></div><div class="bar-controls"><label class="theme-picker" for="theme-toggle">Theme <select class="theme-toggle" id="theme-toggle" title="Saved for every browser once you sign in"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option><option value="ocean">Ocean</option><option value="midnight">Midnight</option><option value="sunset">Sunset</option><option value="contrast">High contrast</option><option value="nord">Nord</option><option value="dracula">Dracula</option><option value="solarized">Solarized</option><option value="gruvbox">Gruvbox</option><option value="rose">Rose</option></select></label><small id="connection">AUTHENTICATED SESSION</small></div></header>
   <main>
-    <section class="heading"><div><h1>Forwarding rules</h1><p class="sub">Every change applies to the firewall right away and syncs with the terminal UI. <strong>Re-apply rules</strong> rebuilds the firewall from your saved rules; you only need it if another tool (a script, ufw, Docker, <code>iptables -F</code>) wiped or changed them.</p></div><div class="actions"><button class="button" id="refresh" title="Reload the rule list from the server">Refresh list</button><button class="button primary" id="reconcile" title="Rebuild the firewall from your saved rules">Re-apply rules</button></div></section>
+    <section class="heading"><div><h1>Forwarding rules</h1><p class="sub">Every change applies to the firewall right away and syncs with the terminal UI. <strong>Re-apply rules</strong> rebuilds the firewall from your saved rules; you only need it if another tool (a script, ufw, Docker, <code>iptables -F</code>) wiped or changed them.</p></div><div class="actions"><button class="button" id="refresh" title="Reload the rule list from the server">Refresh list</button><button class="button" id="show-live" type="button" title="Show the port forwards as the firewall has them right now">Live rules</button><button class="button primary" id="reconcile" title="Rebuild the firewall from your saved rules">Re-apply rules</button></div></section>
     <section class="host" id="host" aria-label="Gateway settings" hidden>
       <div class="host-item"><div><span class="host-label" id="forwarding-label">IPv4 forwarding</span><span class="host-value" id="forwarding-state"></span><span class="host-help" id="forwarding-help">Lets this server pass traffic on. Must be on for any forward to work.</span></div><button class="switch" id="forwarding-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="forwarding-label" aria-describedby="forwarding-help"></button></div>
-      <div class="host-item"><div><span class="host-label">Route (public → VPN)</span><span class="host-value" id="vpn-state"></span><span class="host-help">Internet adapter → VPN tunnel that forwards travel through.</span></div></div>
+      <div class="host-item"><div><span class="host-label">Route (public → VPN)</span><span class="host-value" id="vpn-state"></span><span class="host-help" id="vpn-help">Internet adapter → VPN tunnel that forwards travel through.</span></div></div>
       <div class="host-item"><div><span class="host-label" id="boot-label">Apply rules on boot</span><span class="host-value" id="boot-state"></span><span class="host-help" id="boot-help">Firewall rules vanish on restart; when on, your saved rules are re-applied automatically at startup.</span></div><button class="switch" id="boot-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="boot-label" aria-describedby="boot-help"></button></div>
     </section>
+    <p class="traffic-bar" id="traffic-bar" hidden></p>
     <p class="security-note">This admin UI uses HTTP. Use loopback with an SSH tunnel or terminate TLS at a trusted reverse proxy; do not expose the app port to untrusted networks.</p>
     <div class="notice" id="notice" role="status"></div>
     <div class="layout">
-      <section><div class="search-row"><label class="visually-hidden" for="search">Search rules</label><input id="search" type="search" placeholder="Search port, IP, name, #ID, on/off, tcp/udp, real/masked  (press /)" autocomplete="off" spellcheck="false"><span class="search-count" id="search-count" aria-live="polite"></span></div><div class="table-wrap"><table><thead><tr><th>State</th><th>Rule</th><th>Forward path</th><th>Protocol</th><th>Actions</th></tr></thead><tbody id="rules"></tbody></table><div class="empty" id="empty">No forwarding rules saved.</div></div></section>
+      <section><div class="search-row"><label class="visually-hidden" for="search">Search rules</label><input id="search" type="search" placeholder="Search port, IP, name, #ID, on/off, tcp/udp, real/masked  (press /)" autocomplete="off" spellcheck="false"><span class="search-count" id="search-count" aria-live="polite"></span></div><p class="summary" id="summary"></p><div class="table-wrap"><table><thead><tr><th>State</th><th>Rule</th><th>Forward path</th><th>Protocol</th><th>Actions</th></tr></thead><tbody id="rules"></tbody></table><div class="empty" id="empty">Loading rules…</div></div></section>
       <form class="form" id="add-form"><h2 id="form-title">Add a forward</h2>
         <label for="name">Label</label><input id="name" name="name" maxlength="80" placeholder="Game server">
         <div class="pair"><div><label for="public-port">Public port</label><input id="public-port" name="publicPort" type="number" min="1" max="65535" required></div><div><label for="dest-port">Target port</label><input id="dest-port" name="destPort" type="number" min="1" max="65535" required></div></div>
@@ -171,7 +214,7 @@
         <button class="button" id="cancel-edit" type="button" hidden>Cancel edit</button>
       </form>
     </div>
-    <details class="setup">
+    <details class="setup" id="wireguard-panel">
       <summary>WireGuard VPS setup</summary>
       <div class="setup-body">
         <p class="sub">On the home peer, generate a key with <code>umask 077; wg genkey | tee privatekey | wg pubkey &gt; publickey</code>, then paste its public key below. Existing configs are never overwritten, and creating the file does not start the tunnel.</p>
@@ -208,28 +251,112 @@
         </section>
       </div>
     </details>
+    <details class="setup" id="backups-panel">
+      <summary>Backups</summary>
+      <div class="setup-body">
+        <p class="sub">Your rules and theme are backed up when iptable-ui starts and every 5 minutes while something changed. <strong>Restore</strong> replaces every rule and the theme with the backup and applies them to the firewall right away. The current state is backed up first, so a restore can be undone.</p>
+        <p class="sub">Saved in <code id="backup-folder">…</code>. Download them from there with WinSCP, FileZilla or <code>scp</code>, or with the Download buttons below.</p>
+        <div class="backup-actions"><button class="button primary" id="backup-now" type="button">Back up now</button><button class="button" id="upload-backup" type="button">Upload backup…</button><input id="upload-file" type="file" accept=".db,application/vnd.sqlite3,application/octet-stream" hidden><span class="wg-status" id="backup-status" role="status"></span></div>
+        <table class="backup-list"><tbody id="backups"></tbody></table>
+      </div>
+    </details>
+    <details class="setup" id="live-panel">
+      <summary>Live firewall rules</summary>
+      <div class="setup-body">
+        <p class="sub">The port forwards as the firewall has them right now, with packet and byte counters, from <code id="live-command">sudo iptables -t nat -L IPTUI_DNAT -n -v --line-numbers</code>.</p>
+        <div class="backup-actions"><button class="button" id="refresh-live" type="button">Refresh</button><span class="wg-status" id="live-status" role="status"></span></div>
+        <table class="live-table" id="live-table"></table>
+        <details class="live-raw"><summary>Raw iptables output</summary><pre class="live-output" id="live-output"></pre></details>
+      </div>
+    </details>
+    <details class="setup" id="settings-panel">
+      <summary>Settings</summary>
+      <div class="setup-body">
+        <form id="port-form" class="load-row port-row">
+          <div><label for="web-port">Web UI port</label><input id="web-port" name="port" type="number" min="1" max="65535" required></div>
+          <button class="button" type="submit">Save port</button>
+        </form>
+        <p class="sub">Saved in the database and used every time iptable-ui starts. The web UI moves to the new port right away and this page follows it. Make sure your firewall and VPS provider allow the new port.</p>
+        <form id="folder-form" class="load-row folder-row">
+          <div><label for="backup-dir">Backup folder</label><input id="backup-dir" name="dir" required spellcheck="false"></div>
+          <button class="button" type="submit">Move backups</button>
+        </form>
+        <p class="sub">Existing backups move to the new folder. A folder inside a user's home (such as <code>/home/ubuntu/iptable-ui-backups</code>) is owned by that user, so they can download backups without root.</p>
+        <div class="danger-zone">
+          <h3>Remove all rules</h3>
+          <p class="sub">Deletes every forwarding rule and removes it from the firewall at once. A backup is taken first, so you can undo this from <strong>Backups</strong>.</p>
+          <button class="button danger" id="remove-all" type="button">Remove all rules…</button>
+        </div>
+      </div>
+    </details>
   </main>
   <section class="login" id="login"><form class="login-box" id="login-form"><h1>iptable-ui access</h1><p>Enter the one-time token printed when the app started.</p><label for="token">Session token</label><input id="token" type="password" autocomplete="current-password" required><button class="button primary" type="submit">Unlock</button><div class="notice" id="login-error"></div></form></section>
   <script>
     const login = document.querySelector('#login');
     const notice = document.querySelector('#notice');
     const themeToggle = document.querySelector('#theme-toggle');
-    function syncThemeControl(theme) {
-      themeToggle.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
-      themeToggle.setAttribute('aria-pressed', String(theme === 'dark'));
-      themeToggle.setAttribute('aria-label', `Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`);
+    const darkScheme = matchMedia('(prefers-color-scheme: dark)');
+    let themeChoice = 'system';
+    try { themeChoice = localStorage.getItem('iptable-ui-theme') || 'system'; } catch (_) {}
+    // applyTheme shows a theme; "system" follows the device's light/dark mode.
+    function applyTheme(choice) {
+      themeChoice = choice;
+      themeToggle.value = choice;
+      document.documentElement.dataset.theme = choice === 'system' ? (darkScheme.matches ? 'dark' : 'light') : choice;
+      try { localStorage.setItem('iptable-ui-theme', choice); } catch (_) {}
     }
-    function applyTheme(theme) {
-      document.documentElement.dataset.theme = theme;
-      syncThemeControl(theme);
-      try { localStorage.setItem('iptable-ui-theme', theme); } catch (_) {}
+    applyTheme(themeChoice);
+    darkScheme.addEventListener('change', () => { if (themeChoice === 'system') applyTheme('system'); });
+    themeToggle.addEventListener('change', async () => {
+      applyTheme(themeToggle.value);
+      if (!token || !login.hidden) return;
+      try { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ theme: themeToggle.value }) }); }
+      catch (error) { message(`Theme not saved: ${error.message}`); }
+    });
+    async function loadSettings() {
+      try {
+        const settings = await api('/api/settings');
+        applyTheme(settings.theme);
+        if (settings.port) document.querySelector('#web-port').value = settings.port;
+        if (settings.backupDir) { document.querySelector('#backup-dir').value = settings.backupDir; document.querySelector('#backup-folder').textContent = settings.backupDir; }
+      } catch (_) {}
     }
-    syncThemeControl(document.documentElement.dataset.theme);
-    themeToggle.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     let token = '';
     try { token = sessionStorage.getItem('iptable-ui-token') || ''; } catch (_) {}
+    // After a port change the page reopens on the new port with the token in
+    // the URL fragment (never sent to the server); keep it and tidy the URL.
+    if (location.hash.startsWith('#token=')) {
+      token = decodeURIComponent(location.hash.slice(7));
+      try { sessionStorage.setItem('iptable-ui-token', token); } catch (_) {}
+      history.replaceState(null, '', location.pathname + location.search);
+    }
     let editingRuleId = null;
     let allRules = [];
+    let traffic = null;
+    // readableCounter turns iptables byte counts ("2520", "73K") into "2.5 KB", "73 KB".
+    function readableCounter(value) {
+      const match = /^([\d.]+)([KMGT]?)$/.exec(value);
+      if (!match) return value;
+      const bytes = Number(match[1]) * ({ '': 1, K: 1e3, M: 1e6, G: 1e9, T: 1e12 })[match[2]];
+      return formatRate(bytes).replace('/s', '');
+    }
+    function formatRate(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB', 'TB']; let unit = 0;
+      while (bytes >= 1000 && unit < units.length - 1) { bytes /= 1000; unit++; }
+      return `${unit === 0 || bytes >= 100 ? bytes.toFixed(0) : bytes.toFixed(1).replace(/\.0$/, '')} ${units[unit]}/s`;
+    }
+    // renderTrafficBar shows each network adapter's receive and send speed.
+    function renderTrafficBar() {
+      const bar = document.querySelector('#traffic-bar');
+      if (!traffic || traffic.adapters.length === 0) { bar.hidden = true; return; }
+      bar.replaceChildren('Traffic now: ');
+      traffic.adapters.forEach((adapter, index) => {
+        if (index) bar.append(' · ');
+        const name = document.createElement('strong'); name.textContent = adapter.name;
+        bar.append(name, ` ▼ ${formatRate(adapter.inPerSecond)} received  ▲ ${formatRate(adapter.outPerSecond)} sent`);
+      });
+      bar.hidden = false;
+    }
     const search = document.querySelector('#search');
     search.addEventListener('input', () => render());
     search.addEventListener('keydown', event => { if (event.key === 'Escape') { search.value = ''; render(); } });
@@ -250,6 +377,13 @@
     function renderHost(status) {
       showHostValue('#forwarding-state', status.forwarding, status.forwarding ? 'Enabled' : 'Disabled · forwards blocked');
       showHostValue('#vpn-state', status.vpnUp, `${status.publicInterface} → ${status.vpnInterface} ${status.vpnUp ? 'up' : 'down'}`);
+      const kind = status.vpnKind || 'VPN';
+      document.querySelector('#brand-kind').textContent = `${kind.toUpperCase()} GATEWAY`;
+      document.querySelector('#vpn-help').textContent = status.vpnAddress
+        ? `${kind}: this server is ${status.vpnAddress} on the VPN. Forwards go to your home server's ${kind} address.`
+        : `Internet adapter → ${kind} tunnel that forwards travel through.`;
+      // WireGuard setup is only offered when WireGuard is the VPN (or none is up).
+      document.querySelector('#wireguard-panel').hidden = status.vpnUp && kind !== 'WireGuard';
       showHostValue('#boot-state', status.bootRestore, status.bootRestore ? 'On · rules survive reboot' : 'Off · rules lost on reboot');
       forwardingToggle.setAttribute('aria-checked', String(status.forwarding));
       bootToggle.setAttribute('aria-checked', String(status.bootRestore));
@@ -283,8 +417,11 @@
       if (!token || !login.hidden || refreshingRules) return;
       refreshingRules = true;
       try {
-        allRules = await api('/api/rules');
+        const [rules, measured] = await Promise.all([api('/api/rules'), api('/api/traffic').catch(() => null)]);
+        allRules = rules;
+        traffic = measured;
         render();
+        renderTrafficBar();
         await loadHost();
       } catch (error) { message(error.message); }
       finally { refreshingRules = false; }
@@ -313,7 +450,14 @@
       const empty = document.querySelector('#empty');
       empty.hidden = rows.length > 0;
       empty.textContent = allRules.length === 0 ? 'No forwarding rules saved.' : `No rules match "${query}".`;
-      document.querySelector('#search-count').textContent = query ? `${rows.length} of ${allRules.length} rules` : `${allRules.length} rule${allRules.length === 1 ? '' : 's'}`;
+      const enabled = allRules.filter(rule => rule.enabled).length;
+      const real = allRules.filter(rule => rule.keepClientIP).length;
+      const summary = document.querySelector('#summary'); summary.replaceChildren();
+      for (const [count, label] of [[allRules.length, allRules.length === 1 ? 'rule' : 'rules'], [enabled, 'on'], [allRules.length - enabled, 'off'], [real, 'real client IP']]) {
+        if (summary.childNodes.length) summary.append(' · ');
+        const number = document.createElement('strong'); number.textContent = count; summary.append(number, ` ${label}`);
+      }
+      document.querySelector('#search-count').textContent = query ? `${rows.length} of ${allRules.length} rules` : '';
       for (const rule of rows) {
         const row = document.createElement('tr');
         const state = document.createElement('span'); state.className = `state${rule.enabled ? '' : ' off'}`; state.textContent = rule.enabled ? 'Enabled' : 'Disabled';
@@ -333,7 +477,15 @@
         const target = document.createElement('span'); target.textContent = `${rule.destIP}:${rule.destPort}`;
         publicSide.append(publicLabel, publicEndpoint); targetSide.append(targetLabel, target);
         path.append(publicSide, arrow, targetSide); pathCell.append(path); row.append(pathCell);
-        const protocolCell = document.createElement('td'); protocolCell.className = 'rule-protocol-cell'; protocolCell.textContent = rule.protocol.toUpperCase() + (rule.keepClientIP ? ' · real client IP' : ''); row.append(protocolCell);
+        const protocolCell = document.createElement('td'); protocolCell.className = 'rule-protocol-cell'; protocolCell.textContent = rule.protocol.toUpperCase() + (rule.keepClientIP ? ' · real client IP' : '');
+        const rate = traffic?.rules.find(item => item.id === rule.id);
+        if (rate && rule.enabled) {
+          const speed = document.createElement('span'); speed.className = `rate${rate.inPerSecond + rate.outPerSecond > 0 ? ' busy' : ''}`;
+          speed.textContent = `▼ ${formatRate(rate.inPerSecond)} to server  ▲ ${formatRate(rate.outPerSecond)} to visitors`;
+          speed.title = 'Live speed through this forward';
+          protocolCell.append(speed);
+        }
+        row.append(protocolCell);
         const actions = document.createElement('td'); actions.className = 'actions-cell';
         const edit = document.createElement('button'); edit.className = 'action-button'; edit.type = 'button'; edit.textContent = 'Edit'; edit.title = `Edit ${rule.name || `rule ${rule.id}`}`; edit.onclick = () => beginEdit(rule);
         const toggle = document.createElement('button'); toggle.className = 'action-button'; toggle.type = 'button'; toggle.textContent = rule.enabled ? 'Disable' : 'Enable'; toggle.title = `${rule.enabled ? 'Disable' : 'Enable'} ${rule.name || `rule ${rule.id}`}`; toggle.onclick = () => changeRule(`/api/rules/${rule.id}/enabled`, 'PATCH', { enabled: !rule.enabled }, toggle);
@@ -354,7 +506,7 @@
         await load();
       } catch (error) { message(error.message); }
     }
-    document.querySelector('#login-form').addEventListener('submit', async event => { event.preventDefault(); token = document.querySelector('#token').value.trim(); try { sessionStorage.setItem('iptable-ui-token', token); } catch (_) {} try { await api('/api/rules'); login.hidden = true; startRulePolling(); await load(); } catch (error) { document.querySelector('#login-error').textContent = error.message; document.querySelector('#login-error').style.display = 'block'; } });
+    document.querySelector('#login-form').addEventListener('submit', async event => { event.preventDefault(); token = document.querySelector('#token').value.trim(); try { sessionStorage.setItem('iptable-ui-token', token); } catch (_) {} try { await api('/api/rules'); login.hidden = true; startRulePolling(); await Promise.all([load(), loadSettings()]); } catch (error) { document.querySelector('#login-error').textContent = error.message; document.querySelector('#login-error').style.display = 'block'; } });
     function beginEdit(rule) {
       editingRuleId = rule.id;
       document.querySelector('#form-title').textContent = `Edit rule #${rule.id}`;
@@ -446,7 +598,152 @@
         existingWGStatus.textContent = result.message;
       } catch (error) { existingWGStatus.textContent = error.message; }
     });
-    if (token) { api('/api/rules').then(() => { login.hidden = true; startRulePolling(); load(); }).catch(() => { login.hidden = false; }); }
+    const backupKinds = { startup: 'On startup', auto: 'Automatic', manual: 'Manual', 'pre-restore': 'Before a restore', 'pre-clear': 'Before removing all', uploaded: 'Uploaded' };
+    const backupStatus = document.querySelector('#backup-status');
+    async function loadBackups() {
+      let backups;
+      try { backups = await api('/api/backups'); } catch (error) { backupStatus.textContent = error.message; return; }
+      const body = document.querySelector('#backups'); body.replaceChildren();
+      if (backups.length === 0) { backupStatus.textContent = 'No backups yet.'; return; }
+      backupStatus.textContent = `${backups.length} backup${backups.length === 1 ? '' : 's'}`;
+      for (const item of backups) {
+        const row = document.createElement('tr');
+        const when = document.createElement('td'); when.textContent = new Date(item.time).toLocaleString();
+        const kind = document.createElement('td'); const badge = document.createElement('span'); badge.className = 'backup-kind'; badge.textContent = backupKinds[item.kind] || item.kind; kind.append(badge);
+        const rules = document.createElement('td'); rules.textContent = `${item.rules} rule${item.rules === 1 ? '' : 's'}`;
+        const actions = document.createElement('td');
+        const restore = document.createElement('button'); restore.className = 'action-button'; restore.type = 'button'; restore.textContent = 'Restore';
+        restore.onclick = async () => {
+          if (!confirm(`Restore the backup from ${when.textContent}?\n\nThis replaces all ${allRules.length} current rules and the theme with the ${item.rules} rule(s) in the backup and applies them to the firewall now. The current state is backed up first, so you can undo this.`)) return;
+          restore.disabled = true; restore.textContent = 'Restoring…';
+          try { await api('/api/backups/restore', { method: 'POST', body: JSON.stringify({ name: item.name }) }); message(`Restored the backup from ${when.textContent}. The firewall now matches it.`); await Promise.all([load(), loadSettings()]); }
+          catch (error) { message(error.message); }
+          await loadBackups();
+        };
+        const download = document.createElement('button'); download.className = 'action-button'; download.type = 'button'; download.textContent = 'Download';
+        download.onclick = () => downloadBackup(item.name, download);
+        actions.append(download, ' ', restore); row.append(when, kind, rules, actions); body.append(row);
+      }
+    }
+    document.querySelector('#backups-panel').addEventListener('toggle', event => { if (event.currentTarget.open) loadBackups(); });
+    document.querySelector('#backup-now').onclick = async event => {
+      const button = event.currentTarget; button.disabled = true; button.textContent = 'Backing up…';
+      try { await api('/api/backups', { method: 'POST' }); message('Backup saved.'); await loadBackups(); }
+      catch (error) { message(error.message); }
+      finally { button.disabled = false; button.textContent = 'Back up now'; }
+    };
+    const uploadFile = document.querySelector('#upload-file');
+    document.querySelector('#upload-backup').onclick = () => uploadFile.click();
+    uploadFile.addEventListener('change', async () => {
+      const file = uploadFile.files[0];
+      uploadFile.value = '';
+      if (!file) return;
+      backupStatus.textContent = `Uploading ${file.name}…`;
+      try {
+        const response = await fetch('/api/backups/upload', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' }, body: file });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Upload failed (${response.status})`);
+        await loadBackups();
+        if (confirm(`${file.name} was added to the backups (${result.rules} rule${result.rules === 1 ? '' : 's'}).\n\nRestore it now? This replaces all ${allRules.length} current rules and applies them to the firewall. The current state is backed up first.`)) {
+          await api('/api/backups/restore', { method: 'POST', body: JSON.stringify({ name: result.name }) });
+          message(`Restored ${file.name}. The firewall now matches it.`);
+          await Promise.all([load(), loadSettings(), loadBackups()]);
+        } else {
+          message(`${file.name} was added to the backups. Restore it from the list whenever you like.`);
+        }
+      } catch (error) { message(error.message); await loadBackups(); }
+    });
+    async function loadLive() {
+      const status = document.querySelector('#live-status');
+      status.textContent = 'Reading the firewall…';
+      try {
+        const live = await api('/api/firewall/live');
+        document.querySelector('#live-command').textContent = live.command;
+        document.querySelector('#live-output').textContent = live.output;
+        renderLiveTable(live.table);
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (error) { status.textContent = error.message; }
+    }
+    // renderLiveTable shows the parsed iptables rows; without a table (an
+    // unexpected format) the raw output below is all there is.
+    function renderLiveTable(table) {
+      const element = document.querySelector('#live-table'); element.replaceChildren();
+      document.querySelector('.live-raw').open = !table;
+      if (!table) return;
+      if (table.entries.length === 0) {
+        const row = element.insertRow(); const cell = row.insertCell(); cell.textContent = 'No forwards are active in the firewall yet.'; return;
+      }
+      const head = element.createTHead().insertRow();
+      for (const title of ['#', 'Protocol', 'Forward', 'Arrives on', 'Packets', 'Data']) { const th = document.createElement('th'); th.textContent = title; if (title === 'Packets' || title === 'Data') th.className = 'counter'; head.append(th); }
+      const body = element.createTBody();
+      for (const entry of table.entries) {
+        const row = body.insertRow(); if (entry.active) row.className = 'active';
+        const number = row.insertCell(); number.className = 'num'; number.textContent = entry.number;
+        const proto = row.insertCell(); const badge = document.createElement('span'); badge.className = 'proto'; badge.textContent = entry.protocol; proto.append(badge);
+        const forward = row.insertCell();
+        if (entry.forwardTo) {
+          const port = document.createElement('span'); port.className = 'port'; port.textContent = `:${entry.publicPort}`;
+          const to = document.createElement('span'); to.className = 'to'; to.textContent = entry.forwardTo;
+          forward.append(port, ' → ', to);
+        } else { forward.textContent = `${entry.target} ${entry.extra}`; }
+        if (entry.extra && entry.forwardTo) forward.append(` ${entry.extra}`);
+        row.insertCell().textContent = entry.in;
+        const packets = row.insertCell(); packets.className = 'counter'; packets.textContent = entry.packets;
+        const bytes = row.insertCell(); bytes.className = 'counter'; bytes.textContent = readableCounter(entry.bytes);
+      }
+    }
+    const livePanel = document.querySelector('#live-panel');
+    livePanel.addEventListener('toggle', () => { if (livePanel.open) loadLive(); });
+    document.querySelector('#refresh-live').onclick = loadLive;
+    document.querySelector('#show-live').onclick = () => {
+      if (livePanel.open) loadLive(); else livePanel.open = true;
+      livePanel.scrollIntoView({ behavior: 'smooth' });
+    };
+    document.querySelector('#folder-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const dir = new FormData(event.currentTarget).get('dir').trim();
+      try {
+        const result = await api('/api/settings/backup-dir', { method: 'PUT', body: JSON.stringify({ dir }) });
+        document.querySelector('#backup-folder').textContent = result.backupDir;
+        message(`Backups are now saved in ${result.backupDir}.`);
+        if (document.querySelector('#backups-panel').open) await loadBackups();
+      } catch (error) { message(error.message); }
+    });
+    async function downloadBackup(name, button) {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/backups/download?name=${encodeURIComponent(name)}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `Download failed (${response.status})`);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(await response.blob());
+        link.download = `iptable-ui-${name}`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+      } catch (error) { message(error.message); }
+      finally { button.disabled = false; }
+    }
+    document.querySelector('#port-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const port = Number(new FormData(event.currentTarget).get('port'));
+      if (String(port) === location.port || (!location.port && port === 80)) { message(`The web UI already uses port ${port}.`); return; }
+      try {
+        const result = await api('/api/settings/port', { method: 'PUT', body: JSON.stringify({ port }) });
+        message(result.warning || `Moving to port ${port}…`);
+        // Same host as now, so it works behind the address you already use.
+        setTimeout(() => { location.href = `${location.protocol}//${location.hostname}:${port}/#token=${encodeURIComponent(token)}`; }, 600);
+      } catch (error) { message(error.message); }
+    });
+    document.querySelector('#remove-all').onclick = async () => {
+      const typed = prompt(`This removes all ${allRules.length} rules from the database and the firewall now (a backup is taken first).\n\nType REMOVE ALL to confirm:`);
+      if (typed === null) return;
+      if (typed.trim() !== 'REMOVE ALL') { message('Nothing was removed: the confirmation text did not match.'); return; }
+      try {
+        const result = await api('/api/rules/remove-all', { method: 'POST', body: JSON.stringify({ confirm: 'REMOVE ALL' }) });
+        message(`Removed ${result.removed} rule(s). A backup was taken first; restore it from Backups to undo.${result.notice ? ' ' + result.notice + '.' : ''}`);
+        await load(); if (document.querySelector('#backups-panel').open) await loadBackups();
+      } catch (error) { message(error.message); }
+    };
+    if (token) { api('/api/rules').then(() => { login.hidden = true; startRulePolling(); load(); loadSettings(); }).catch(() => { login.hidden = false; }); }
   </script>
 </body>
 </html>

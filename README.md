@@ -111,6 +111,17 @@ Rebuilds the firewall from your saved rules, the same as `R` in the TUI. This is
 
 ### Web Interface
 
+The web address and sign-in token are masked on screen (`http://203.•••.•••.•••:8787`,
+`3f9a••••••••`), so screenshots and screen sharing do not give them away. They stay usable:
+
+- **Click** the masked address (Ctrl+click in most terminals) to open the web UI already signed
+  in, in terminals that support links (Windows Terminal, iTerm2, GNOME Terminal, kitty, WezTerm).
+- Press **`C`** in the TUI to copy the full sign-in link to your computer's clipboard (OSC 52; also
+  works over SSH and inside tmux).
+- Press **`V`** to show the real address and token, for terminals without links or clipboard
+  support such as PuTTY, then **`V`** again to hide them. In whiptail mode, choose **Show web UI
+  sign-in link**.
+
 After starting the application:
 1. Open your browser to `http://localhost:8787`
 2. Enter the temporary web token displayed in the terminal
@@ -131,8 +142,14 @@ The TUI provides:
 - Gateway status: IPv4 forwarding, VPN link and apply-on-boot
 - A help screen (`?`) explaining every key
 
+The help bar lists the everyday keys. Press `Enter` on a rule for its actions (edit, on/off, real
+client IP, remove), and `M` for a menu with everything else. Every letter below also works
+directly from the rule list.
+
 | Key | Action |
 | --- | --- |
+| `Enter` | Actions for the selected rule |
+| `M` | More actions menu |
 | `/` | Search: filter rules as you type (`Enter` keeps the filter, `Esc` clears it) |
 | `A` / `E` | Add / edit a rule |
 | `T` | Enable or disable the selected rule |
@@ -141,6 +158,14 @@ The TUI provides:
 | `R` | Re-apply rules: rebuild the firewall from your saved rules (only needed if another tool wiped them) |
 | `F` | Toggle IPv4 packet forwarding (asks before turning it off) |
 | `B` | Apply rules on boot: re-apply your saved rules automatically after a reboot |
+| `S` | Backups: back up now (`N`), download (`D`), restore (`Enter`), import a file (`I`), change folder (`O`) |
+| `L` | Live firewall rules (`iptables -t nat -L IPTUI_DNAT -n -v --line-numbers`) |
+| `P` | Change the web UI port (saved for next time) |
+| `C` | Copy the web UI sign-in link to your clipboard |
+| `V` | Show or hide the web UI address and token (masked by default) |
+| `O` | Switch the TUI look (saved for next time) |
+| `N` | Switch between the detailed and the simple view (saved for next time) |
+| `X` | Remove all rules (type `REMOVE ALL` to confirm; a backup is taken first) |
 | `G` | WireGuard setup |
 | `W` | Start or stop the web UI |
 | `U` | Switch to the whiptail look (classic blue menus; needs the whiptail package) |
@@ -151,7 +176,8 @@ The TUI provides:
 
 Prefer classic blue menus like `raspi-config`? Start with `--whiptail`, or press `U` in the TUI.
 Whiptail mode can list, add, edit, toggle and remove rules, and toggle forwarding, apply-on-boot and
-the web UI. Choose "Switch to the full TUI" to go back (WireGuard setup lives there).
+the web UI. Choose "Switch to the full TUI" to go back; the full TUI also has the options whiptail
+mode does not (backups, live firewall rules, web port, remove all, search and WireGuard setup).
 
 ```bash
 sudo apt install whiptail      # Debian/Ubuntu (Fedora: sudo dnf install newt)
@@ -159,6 +185,89 @@ iptable-ui --whiptail
 ```
 
 The web UI shows the same gateway status with switches for forwarding and apply-on-boot.
+
+### Themes
+
+Pick a theme from the **Theme** menu in the web UI header: System (follows your device's light or
+dark mode), Light, Dark, Ocean, Midnight, Sunset, High contrast, Nord, Dracula, Solarized, Gruvbox
+or Rose. The choice is saved in
+iptable-ui's database, so every browser you sign in from uses it.
+
+The TUI has its own look: press `O` (or pick **TUI look** in the `M` menu) to switch between
+Classic, Readable (bright, high contrast), Light terminal (for white backgrounds), Ocean and Plain
+(no colors, for monochrome terminals and screen readers). It is saved in the database too.
+
+Press `N` (or pick **Simple view** in the `M` menu) for a cleaner, plain-language view: the header
+reads "Forwarding is on.", "Connected through Tailscale (this server is 100.64.0.1 on it).",
+"After a reboot: your rules come back automatically.", and each rule reads like
+`On   Minecraft   port 25565 → 10.66.0.2:25565   TCP+UDP` (the port this server listens on, then
+where it forwards to). Press `N` again for the detailed view with
+interface names, codes and columns. The choice is saved in the database.
+
+### Traffic and VPN
+
+- **Speeds:** the TUI header and the web UI show how fast each network adapter is receiving (RX)
+  and sending (TX). Each forward shows its own speed: ▼ toward your server, ▲ back to visitors
+  (on wide TUI screens, in a rule's `Enter` menu, and on each rule in the web UI). Speeds come from
+  counters the kernel already keeps and are measured every 2 seconds.
+- **VPN:** iptable-ui names the VPN it forwards through (WireGuard, Tailscale, NetBird, ZeroTier,
+  Nebula, OpenVPN) and shows this server's address on it. The web UI header follows it
+  ("TAILSCALE GATEWAY"), and WireGuard setup is hidden while another VPN is in use.
+- **Importing:** when another script made a TCP rule and a UDP rule for the same port and
+  destination, iptable-ui combines them into one TCP+UDP rule, including pairs imported earlier.
+
+### Backups
+
+iptable-ui backs up its database (all rules and settings such as the theme) to
+`~/iptable-ui-backups` of the user who ran `sudo` (for example `/home/ubuntu/iptable-ui-backups`,
+or `/root/iptable-ui-backups` when logged in as root). The files belong to that user, so you can
+download them with WinSCP, FileZilla or `scp` without root. The folder is shown on startup, in the
+web UI's Backups section and on the TUI backups screen. Change it under **Settings → Backup folder**
+or with `O` on the TUI backups screen; existing backups move with it. Backups are taken:
+
+- when it starts,
+- every 5 minutes while it runs, but only when something changed,
+- whenever you press **Back up now** (web UI, Backups section) or `N` on the backups screen
+  (`S` in the TUI).
+
+**Download** saves a backup to your computer: in the web UI, click **Download** next to a backup.
+In the TUI, press `D` on a backup to get a link (`http://<server>:<port>/download/...`) that works
+for 10 minutes without signing in, for a browser or `curl -O`. The web UI must be on (`W`). The
+TUI also prints an `scp` command for copying the file directly.
+
+**Upload** a backup file (for example one you downloaded earlier) with **Upload backup…** in the
+web UI. On the TUI backups screen, press `I` to import a file that is already on the server (copy it
+there with `scp` first). Only real iptable-ui databases with valid rules are accepted; the upload is
+added to the list, and the web UI offers to restore it right away.
+
+**Restore** replaces every rule and setting with the backup and applies the rules to the firewall
+right away. The current state is backed up first (shown as "before a restore"), so you can undo a
+restore by restoring that backup. The newest 100 automatic backups and 20 before-restore backups
+are kept; manual backups are never deleted automatically. Host settings that live outside the
+database (IPv4 forwarding, apply on boot, WireGuard configs) are not part of a backup.
+
+### Live Firewall Rules
+
+To see the port forwards exactly as the firewall has them, with packet and byte counters, click
+**Live rules** in the web UI or press `L` in the TUI (also in the `M` menu). It runs:
+
+```bash
+sudo iptables -t nat -L IPTUI_DNAT -n -v --line-numbers
+```
+
+### Web UI Port
+
+The web UI listens on port 8787 by default. Change it under **Settings** in the web UI, or press
+`P` in the TUI. The new port is saved in the database and used every time iptable-ui starts; a
+running web UI moves to it immediately and the browser page follows. Allow the new port in your
+firewall and at your VPS provider. Passing `--web-address` on the command line overrides the saved
+port for that run.
+
+### Removing All Rules
+
+**Remove all rules** (web UI **Settings**, or `X` in the TUI) deletes every forwarding rule from the
+database and the firewall at once. You must type `REMOVE ALL` to confirm, and a backup is taken
+first (listed as "before removing all"), so you can undo it by restoring that backup.
 
 ### Searching Rules
 

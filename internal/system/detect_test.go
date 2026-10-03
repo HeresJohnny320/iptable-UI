@@ -123,3 +123,33 @@ func TestDetectVPNInterfacePrefersActiveTunnelWithoutRules(t *testing.T) {
 		}
 	}
 }
+
+func TestVPNKind(t *testing.T) {
+	tests := []struct {
+		name      string
+		wireGuard bool
+		want      string
+	}{
+		{"tailscale0", false, "Tailscale"},
+		{"wt0", true, "NetBird"}, // NetBird uses a WireGuard device
+		{"wg0", true, "WireGuard"},
+		{"homelink", true, "WireGuard"},
+		{"ztabc123", false, "ZeroTier"},
+		{"nebula1", false, "Nebula"},
+		{"tun0", false, "OpenVPN"},
+		{"ppp0", false, "PPP"},
+		{"mystery", false, "VPN"},
+		{"", false, ""},
+	}
+	for _, test := range tests {
+		if got := VPNKind(test.name, test.wireGuard); got != test.want {
+			t.Errorf("VPNKind(%q, %v) = %q, want %q", test.name, test.wireGuard, got, test.want)
+		}
+	}
+	host := fakeHost(t, nil, fakeInterface{name: "tailscale0", up: true, ipv4: true})
+	host.VPNInterface = "tailscale0"
+	host.IPv4Address = func(string) string { return "100.64.0.1" }
+	if status := host.Status(context.Background()); status.VPNKind != "Tailscale" || status.VPNAddress != "100.64.0.1" || !status.VPNUp {
+		t.Fatalf("status %+v", status)
+	}
+}

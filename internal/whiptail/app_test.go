@@ -114,7 +114,7 @@ func TestAddToggleAndRemoveRule(t *testing.T) {
 		"Rule #1 added: ON  :25565 -> 10.66.0.2:25565  BOTH  real IP  Minecraft",
 		"Rule #1 disabled",
 		"Rule #1 removed",
-		"Forwarding ON | Route ens3 -> wg0 UP | Apply on boot OFF",
+		"Forwarding ON | Route ens3 -> wg0 (VPN) UP | Apply on boot OFF",
 	} {
 		if !strings.Contains(transcript, expected) {
 			t.Errorf("transcript missing %q:\n%s", expected, transcript)
@@ -198,5 +198,31 @@ func TestSwitchToTUIAndCancelQuits(t *testing.T) {
 func TestTextLinesWrapsLongLines(t *testing.T) {
 	if got := textLines(strings.Repeat("x", 100)+"\nshort", 54); got != 3 {
 		t.Fatalf("got %d lines, want 3 (100 chars at 50 per line, plus one)", got)
+	}
+}
+
+type fakeWeb struct{}
+
+func (fakeWeb) Toggle() (bool, error) { return true, nil }
+func (fakeWeb) Enabled() bool         { return true }
+func (fakeWeb) StatusText() string    { return "ON at http://203.0.113.5:8787 (plain HTTP)" }
+func (fakeWeb) MaskedStatusText() string {
+	return "ON at http://203.•••.•••.•••:8787 (plain HTTP)"
+}
+func (fakeWeb) Token() string     { return "3f9a00112233" }
+func (fakeWeb) SignInURL() string { return "http://203.0.113.5:8787/#token=3f9a00112233" }
+
+func TestWebAddressIsMaskedButCanBeShown(t *testing.T) {
+	service, _ := newService(t)
+	dialog := &scriptedDialog{t: t, steps: []step{ok("link"), ok("quit")}}
+	if _, err := Run(dialog, service, fakeWeb{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	status := dialog.seen[0]
+	if strings.Contains(status, "203.0.113.5") || strings.Contains(status, "3f9a00112233") || !strings.Contains(status, "203.•••.•••.•••") || !strings.Contains(status, "3f9a••••••••") {
+		t.Fatalf("the main menu should mask the IP and token: %s", status)
+	}
+	if len(dialog.messages) != 1 || !strings.Contains(dialog.messages[0], "http://203.0.113.5:8787/#token=3f9a00112233") {
+		t.Fatalf("the sign-in link item should show the full link: %v", dialog.messages)
 	}
 }

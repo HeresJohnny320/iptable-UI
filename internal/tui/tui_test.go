@@ -2,13 +2,19 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
+	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
 	"github.com/HeresJohnny320/iptable-ui/internal/system"
+	"github.com/HeresJohnny320/iptable-ui/internal/traffic"
 	wgsetup "github.com/HeresJohnny320/iptable-ui/internal/wireguard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -17,6 +23,7 @@ import (
 
 type testWebControl struct {
 	enabled bool
+	port    int
 }
 
 func (w *testWebControl) Toggle() (bool, error) {
@@ -24,7 +31,22 @@ func (w *testWebControl) Toggle() (bool, error) {
 	return w.enabled, nil
 }
 
-func (w *testWebControl) Enabled() bool   { return w.enabled }
+func (w *testWebControl) Enabled() bool { return w.enabled }
+func (w *testWebControl) Port() int {
+	if w.port == 0 {
+		return 8787
+	}
+	return w.port
+}
+func (w *testWebControl) SetPort(port int) (string, error) {
+	w.port = port
+	return fmt.Sprintf("http://203.0.113.5:%d", port), nil
+}
+func (w *testWebControl) URL() string       { return "http://127.0.0.1:8787/" }
+func (w *testWebControl) SignInURL() string { return w.URL() + "#token=" + w.Token() }
+func (w *testWebControl) DownloadLink(name string) (string, error) {
+	return "http://203.0.113.5:8787/download/secret-" + name, nil
+}
 func (w *testWebControl) Address() string { return "127.0.0.1:8787" }
 func (w *testWebControl) Token() string   { return "temporary-token" }
 func (w *testWebControl) StatusText() string {
@@ -41,8 +63,55 @@ func TestWebToggleKeyAndTokenDisplay(t *testing.T) {
 	if !webControl.Enabled() {
 		t.Fatal("w key did not enable the web UI")
 	}
-	if view := updated.(model).View(); !contains(view, "temporary-token") || !contains(view, "ON at http://127.0.0.1:8787") {
-		t.Fatalf("TUI does not show web state and token: %s", view)
+	view := updated.(model).View()
+	if !contains(view, "temp••••••••") || contains(view, "temporary-token") || !contains(view, "ON at http://127.0.0.1:8787") {
+		t.Fatalf("TUI should show the web state with the token masked: %s", view)
+	}
+	revealed, _ := updated.(model).updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if view := revealed.(model).View(); !contains(view, "temporary-token") || !contains(view, "V hide") {
+		t.Fatalf("V should reveal the token: %s", view)
+	}
+	hidden, _ := revealed.(model).updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if contains(hidden.(model).View(), "temporary-token") {
+		t.Fatal("V again should hide the token")
+	}
+}
+
+// publicWebControl serves the web UI on a public IP, which must be masked.
+type publicWebControl struct{ testWebControl }
+
+func (w *publicWebControl) URL() string { return "http://203.0.113.5:8787/" }
+func (w *publicWebControl) StatusText() string {
+	return "ON at http://203.0.113.5:8787 (plain HTTP)"
+}
+func (w *publicWebControl) SignInURL() string { return w.URL() + "#token=" + w.Token() }
+
+func TestPublicAddressIsMaskedUntilRevealed(t *testing.T) {
+	current := model{width: 100, webControl: &publicWebControl{testWebControl{enabled: true}}}
+	if view := current.View(); !contains(view, "ON at http://203.•••.•••.•••:8787 (plain HTTP)") || contains(view, "203.0.113.5") {
+		t.Fatalf("the public IP should be masked:\n%s", view)
+	}
+	current.reveal = true
+	if view := current.View(); !contains(view, "ON at http://203.0.113.5:8787") {
+		t.Fatalf("V should show the real IP:\n%s", view)
+	}
+}
+
+func TestCopySignInLink(t *testing.T) {
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr := os.Stderr
+	os.Stderr = write
+	t.Setenv("TMUX", "")
+	current, _ := press(t, model{webControl: &testWebControl{enabled: true}}, "c")
+	os.Stderr = stderr
+	write.Close()
+	sequence, _ := io.ReadAll(read)
+	encoded := base64.StdEncoding.EncodeToString([]byte("http://127.0.0.1:8787/#token=temporary-token"))
+	if !strings.Contains(string(sequence), "\x1b]52;c;"+encoded) || !strings.Contains(current.message, "copied to your clipboard") {
+		t.Fatalf("C should send the sign-in link over OSC 52: %q, %q", sequence, current.message)
 	}
 }
 
@@ -71,7 +140,7 @@ func TestEditKeyPrefillsSelectedRule(t *testing.T) {
 func TestRuleMenuHighlightsForwardDetails(t *testing.T) {
 	current := model{width: 80, rules: []store.Rule{{ID: 5, Name: "Game server", PublicPort: 25565, DestIP: "192.168.1.20", DestPort: 25566, Protocol: "both", Enabled: true}}}
 	view := current.View()
-	for _, expected := range []string{"PORT FORWARD MANAGER", "RULES MENU", "ENABLED", "Game server", "PUBLIC", ":25565", "192.168.1.20", "25566", "PROTOCOL BOTH", "UP/DOWN", "WireGuard"} {
+	for _, expected := range []string{"PORT FORWARD MANAGER", "RULES MENU", "ENABLED", "Game server", "PUBLIC", ":25565", "192.168.1.20", "25566", "PROTOCOL BOTH", "UP/DOWN", "actions", "more"} {
 		if !strings.Contains(view, expected) {
 			t.Errorf("TUI view missing %q:\n%s", expected, view)
 		}
@@ -228,6 +297,11 @@ func (s *testRuleStore) Update(_ context.Context, rule store.Rule) (store.Rule, 
 	return rule, nil
 }
 func (s *testRuleStore) SetEnabled(context.Context, int64, bool) error { return nil }
+func (s *testRuleStore) DeleteAll(context.Context) ([]store.Rule, error) {
+	removed := s.rules
+	s.rules = nil
+	return removed, nil
+}
 func (s *testRuleStore) Delete(_ context.Context, id int64) error {
 	s.deleted = append(s.deleted, id)
 	return nil
@@ -263,7 +337,7 @@ func TestHostStatusShownInHeader(t *testing.T) {
 	current := model{width: 90, system: &testSystem{status: system.Status{PublicInterface: "ens3", VPNInterface: "wg0"}}}
 	current = run(t, current, current.loadSystem)
 	view := current.View()
-	for _, expected := range []string{"FORWARDING", "OFF (forwards blocked)", "ROUTE", "ens3 -> wg0 DOWN", "APPLY ON BOOT", "OFF (rules lost on reboot)", "forwarding", "apply on boot", "re-apply rules", "help"} {
+	for _, expected := range []string{"FORWARDING", "OFF (forwards blocked)", "ROUTE", "ens3 -> wg0 DOWN", "APPLY ON BOOT", "OFF (rules lost on reboot)", "more", "help"} {
 		if !strings.Contains(view, expected) {
 			t.Errorf("view missing %q:\n%s", expected, view)
 		}
@@ -437,7 +511,7 @@ func TestStandardTerminalShowsRulesUnderFullHeader(t *testing.T) {
 	}
 	current := model{width: 80, height: 24, rules: rules, webControl: &testWebControl{enabled: true}, system: &testSystem{}, systemStatus: &system.Status{PublicInterface: "ens3", VPNInterface: "wg0"}}
 	view := current.View()
-	for _, expected := range []string{"temporary-token", "FORWARDING", "ROUTE", ":8080 -> 192.168.100.200:80", "Q   quit"} {
+	for _, expected := range []string{"temp••••••••", "FORWARDING", "ROUTE", ":8080 -> 192.168.100.200:80", "Q   quit"} {
 		if !strings.Contains(view, expected) {
 			t.Errorf("80x24 view missing %q:\n%s", expected, view)
 		}
@@ -531,8 +605,9 @@ func TestWhiptailKey(t *testing.T) {
 		t.Fatal("with whiptail installed, U should leave the TUI to switch modes")
 	}
 	for _, installed := range []bool{true, false} {
-		if !strings.Contains((model{allowWhiptail: installed, width: 120}).View(), "whiptail look") {
-			t.Fatalf("the U key should always be listed (whiptail installed: %v)", installed)
+		opened, _ := press(t, model{allowWhiptail: installed, width: 120, height: 40}, "m")
+		if !strings.Contains(opened.View(), "Whiptail look") {
+			t.Fatalf("the More menu should always offer the whiptail look (installed: %v):\n%s", installed, opened.View())
 		}
 	}
 }
@@ -718,6 +793,485 @@ func TestSearchLineFitsSmallTerminals(t *testing.T) {
 		for _, text := range lines {
 			if lipgloss.Width(text) > size[0] {
 				t.Errorf("%dx%d: line %d wide", size[0], size[1], lipgloss.Width(text))
+			}
+		}
+	}
+}
+
+func TestBackupScreenBacksUpAndRestores(t *testing.T) {
+	directory := t.TempDir()
+	database, err := store.Open(filepath.Join(directory, "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := app.Service{Store: database, Firewall: testRuleFirewall{}}
+	manager := &backup.Manager{Store: database, Dir: filepath.Join(directory, "backups"),
+		Apply: func(ctx context.Context, rules []store.Rule, settings map[string]string) error {
+			if err := database.ReplaceAll(ctx, rules, settings); err != nil {
+				return err
+			}
+			return service.Reconcile(ctx)
+		}}
+	ctx := context.Background()
+	if _, err := service.Add(ctx, store.Rule{Name: "keep", PublicPort: 80, DestIP: "10.0.0.2", DestPort: 80, Protocol: "tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	current := model{width: 90, height: 30, service: service, backups: manager}
+	current, command := press(t, current, "s")
+	current = run(t, current, command)
+	if current.activeScreen != backupScreen || !strings.Contains(current.View(), "No backups yet") {
+		t.Fatalf("S should open the backups screen:\n%s", current.View())
+	}
+	updated, command := current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	current = updated.(model)
+	updated, _ = current.Update(command())
+	updated, _ = updated.(model).Update(updated.(model).loadBackups()) // the reload it schedules
+	current = updated.(model)
+	if len(current.backupList) != 1 || !strings.Contains(current.message, "Backup saved (1 rules)") || !strings.Contains(current.View(), "manual") {
+		t.Fatalf("N should make a manual backup: %q\n%s", current.message, current.View())
+	}
+	if _, err := service.Add(ctx, store.Rule{Name: "extra", PublicPort: 443, DestIP: "10.0.0.3", DestPort: 443, Protocol: "tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyEnter})
+	current = updated.(model)
+	if current.confirm == nil || !strings.Contains(current.message, "Restore the backup from") {
+		t.Fatalf("ENTER should ask before restoring: %q", current.message)
+	}
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if current = updated.(model); current.message != "Cancelled." {
+		t.Fatal("any key but y should cancel the restore")
+	}
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command = updated.(model).updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	updated, _ = updated.(model).Update(command())
+	if current = updated.(model); !strings.Contains(current.message, "Restored the backup from") {
+		t.Fatalf("restore result: %q", current.message)
+	}
+	if rules, _ := database.List(ctx); len(rules) != 1 || rules[0].Name != "keep" {
+		t.Fatalf("restore should bring back the single saved rule, got %+v", rules)
+	}
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).activeScreen != listScreen {
+		t.Fatal("ESC should return to the rules")
+	}
+}
+
+func TestBackupScreenFitsSmallTerminals(t *testing.T) {
+	backups := make([]backup.Info, 40)
+	for index := range backups {
+		backups[index] = backup.Info{Name: fmt.Sprint(index), Kind: backup.Auto, Rules: index}
+	}
+	for _, size := range [][2]int{{20, 8}, {40, 12}, {80, 24}, {120, 40}} {
+		current := model{width: size[0], height: size[1], activeScreen: backupScreen, backupList: backups, backupCursor: 35, message: "Backup saved (3 rules)."}
+		lines := strings.Split(current.backupView(), "\n")
+		if len(lines) > size[1] {
+			t.Errorf("%dx%d: %d lines", size[0], size[1], len(lines))
+		}
+		for _, text := range lines {
+			if lipgloss.Width(text) > size[0] {
+				t.Errorf("%dx%d: line %d wide", size[0], size[1], lipgloss.Width(text))
+			}
+		}
+		if size[1] >= 12 && !strings.Contains(current.backupView(), "35 rules") {
+			t.Errorf("%dx%d: the selected backup should stay in view", size[0], size[1])
+		}
+	}
+}
+
+func submitPrompt(t *testing.T, current model, text string) (model, tea.Cmd) {
+	t.Helper()
+	current = typeKeys(t, current, text)
+	updated, command := current.updateList(tea.KeyMsg{Type: tea.KeyEnter})
+	return updated.(model), command
+}
+
+func TestPortPrompt(t *testing.T) {
+	web := &testWebControl{enabled: true}
+	current, _ := press(t, model{webControl: web}, "p")
+	if current.prompt == nil || current.prompt.value != "8787" {
+		t.Fatal("P should open the port prompt with the current port")
+	}
+	for range 4 {
+		updated, _ := current.updateList(tea.KeyMsg{Type: tea.KeyBackspace})
+		current = updated.(model)
+	}
+	current, command := submitPrompt(t, current, "99999")
+	if command != nil || !strings.Contains(current.message, "1 to 65535") {
+		t.Fatalf("an invalid port must be refused: %q", current.message)
+	}
+	current, _ = press(t, current, "p")
+	updated, _ := current.updateList(tea.KeyMsg{Type: tea.KeyEsc})
+	if current = updated.(model); current.prompt != nil || current.message != "Cancelled." {
+		t.Fatal("ESC should cancel the prompt")
+	}
+	current, _ = press(t, current, "p")
+	for range 4 {
+		updated, _ := current.updateList(tea.KeyMsg{Type: tea.KeyBackspace})
+		current = updated.(model)
+	}
+	current, command = submitPrompt(t, current, "9443")
+	finished := command().(actionFinished)
+	if web.port != 9443 || !strings.Contains(finished.message, "Web UI moved to http://203.0.113.5:9443") {
+		t.Fatalf("port change: %d %q", web.port, finished.message)
+	}
+}
+
+func TestRemoveAllNeedsTypedConfirmation(t *testing.T) {
+	rules := &testRuleStore{rules: searchRules()}
+	current := model{service: app.Service{Store: rules, Firewall: testRuleFirewall{}}}
+	current.updateRules(rules.rules)
+	current, _ = press(t, current, "x")
+	if current.prompt == nil || !strings.Contains(current.prompt.label, "Remove all 3 rules") {
+		t.Fatal("X should ask for typed confirmation")
+	}
+	// "q" and "y" are letters here, not quit or yes.
+	current, command := submitPrompt(t, current, "yq")
+	if command != nil || len(rules.rules) != 3 || !strings.Contains(current.message, "Nothing was removed") {
+		t.Fatalf("wrong confirmation text must remove nothing: %q", current.message)
+	}
+	current, _ = press(t, current, "x")
+	current, command = submitPrompt(t, current, "REMOVE ALL")
+	finished := command().(actionFinished)
+	if finished.err != nil || len(rules.rules) != 0 || !strings.Contains(finished.message, "Removed 3 rule(s)") {
+		t.Fatalf("remove all: %+v, %d left", finished, len(rules.rules))
+	}
+	if current, _ := press(t, model{}, "x"); current.prompt != nil {
+		t.Fatal("with no rules there is nothing to remove")
+	}
+}
+
+type pathBackups struct{ BackupControl }
+
+func (pathBackups) Path(name string) (string, error) {
+	return "/var/lib/iptable-ui/db-backups/" + name, nil
+}
+
+func TestBackupDownloadKey(t *testing.T) {
+	web := &testWebControl{}
+	current := model{activeScreen: backupScreen, webControl: web, backups: pathBackups{}, backupList: []backup.Info{{Name: "rules-x.db", Rules: 2}}}
+	updated, _ := current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if message := updated.(model).message; !strings.Contains(message, "Turn on the web UI (W)") || !strings.Contains(message, "scp root@<this-server>:/var/lib/iptable-ui/db-backups/rules-x.db") {
+		t.Fatalf("with the web UI off, D should explain and offer scp: %q", message)
+	}
+	web.enabled = true
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if message := updated.(model).message; !strings.Contains(message, "http://203.0.113.5:8787/download/secret-rules-x.db") || !strings.Contains(message, "10 minutes") {
+		t.Fatalf("D should show the download link: %q", message)
+	}
+}
+
+func TestPromptFitsSmallTerminals(t *testing.T) {
+	for _, size := range [][2]int{{20, 8}, {40, 12}, {80, 24}} {
+		current := model{width: size[0], height: size[1], prompt: &textPrompt{label: "Remove all 120 rules? A backup is taken first. Type REMOVE ALL", value: "REMOVE"}}
+		current.updateRules(searchRules())
+		lines := strings.Split(current.listView(), "\n")
+		if len(lines) > size[1] {
+			t.Errorf("%dx%d: %d lines", size[0], size[1], len(lines))
+		}
+		for _, text := range lines {
+			if lipgloss.Width(text) > size[0] {
+				t.Errorf("%dx%d: line %d wide", size[0], size[1], lipgloss.Width(text))
+			}
+		}
+	}
+}
+
+func TestEnterOpensRuleActions(t *testing.T) {
+	rules := &testRuleStore{rules: searchRules()}
+	current := model{width: 100, height: 30, service: app.Service{Store: rules, Firewall: testRuleFirewall{}}}
+	current.updateRules(rules.rules)
+	updated, _ := current.updateList(tea.KeyMsg{Type: tea.KeyEnter})
+	current = updated.(model)
+	view := current.View()
+	if current.menu == nil || !strings.Contains(view, "Rule #1  Minecraft") || !strings.Contains(view, "Turn off") || !strings.Contains(view, "ESC") {
+		t.Fatalf("ENTER should open the selected rule's actions:\n%s", view)
+	}
+	// DOWN then ENTER picks "Turn off", the same as pressing T.
+	updated, _ = current.updateList(tea.KeyMsg{Type: tea.KeyDown})
+	updated, command := updated.(model).updateList(tea.KeyMsg{Type: tea.KeyEnter})
+	if current = updated.(model); current.menu != nil || command == nil || command().(actionFinished).message != "Rule #1 disabled" {
+		t.Fatal("choosing Turn off should close the menu and disable the rule")
+	}
+	// A letter runs its item directly: D asks to remove.
+	updated, _ = current.updateList(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = updated.(model).updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if current = updated.(model); current.confirm == nil || !strings.Contains(current.message, "Remove rule #1") {
+		t.Fatalf("D in the menu should ask to remove the rule: %q", current.message)
+	}
+	updated, _ = current.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	updated, _ = updated.(model).updateList(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = updated.(model).updateList(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).menu != nil {
+		t.Fatal("ESC should close the menu")
+	}
+	if empty, _ := (model{}).updateList(tea.KeyMsg{Type: tea.KeyEnter}); empty.(model).menu != nil {
+		t.Fatal("with no rules, ENTER has nothing to act on")
+	}
+}
+
+func TestMoreMenuHoldsTheOtherActions(t *testing.T) {
+	current := model{width: 100, height: 40, system: &testSystem{}, systemStatus: &system.Status{}, webControl: &testWebControl{}, backups: pathBackups{}}
+	current.updateRules(searchRules())
+	current, _ = press(t, current, "m")
+	view := current.View()
+	for _, expected := range []string{"More actions", "Re-apply rules", "IPv4 forwarding: turn on", "Apply on boot: turn on", "Backups", "Web UI port", "Remove all rules", "WireGuard setup", "Whiptail look"} {
+		if !strings.Contains(view, expected) {
+			t.Errorf("More menu missing %q:\n%s", expected, view)
+		}
+	}
+	// Choosing Backups opens the backups screen.
+	updated, _ := current.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if updated.(model).activeScreen != backupScreen || updated.(model).menu != nil {
+		t.Fatal("S in the More menu should open backups")
+	}
+	// M again closes it.
+	current, _ = press(t, current, "m")
+	if current.menu != nil {
+		t.Fatal("M should close the More menu")
+	}
+}
+
+func TestMenusFitSmallTerminals(t *testing.T) {
+	for _, size := range [][2]int{{20, 8}, {40, 12}, {80, 24}} {
+		current := model{width: size[0], height: size[1], system: &testSystem{}, systemStatus: &system.Status{}, webControl: &testWebControl{}}
+		current.updateRules(searchRules())
+		current.menu = current.moreMenu()
+		current.menu.cursor = len(current.menu.items) - 1
+		view := current.listView()
+		lines := strings.Split(view, "\n")
+		if len(lines) > size[1] {
+			t.Errorf("%dx%d: %d lines", size[0], size[1], len(lines))
+		}
+		for _, text := range lines {
+			if lipgloss.Width(text) > size[0] {
+				t.Errorf("%dx%d: line %d wide", size[0], size[1], lipgloss.Width(text))
+			}
+		}
+		if size[1] >= 12 && !strings.Contains(view, "Whiptail") {
+			t.Errorf("%dx%d: the selected item should stay in view:\n%s", size[0], size[1], view)
+		}
+	}
+}
+
+type liveRuleFirewall struct{ testRuleFirewall }
+
+func (liveRuleFirewall) LiveRules(context.Context) (string, error) {
+	return "Chain IPTUI_DNAT (1 references)\n num   pkts bytes target  prot opt in   out  source     destination\n 1       42  2520 DNAT    6    --  ens3 *    0.0.0.0/0  0.0.0.0/0  tcp dpt:25565 to:10.66.0.2:25565\n", nil
+}
+
+func TestLiveRulesScreen(t *testing.T) {
+	current := model{width: 90, height: 24, service: app.Service{Store: &testRuleStore{}, Firewall: liveRuleFirewall{}}}
+	current, command := press(t, current, "l")
+	updated, _ := current.Update(command())
+	current = updated.(model)
+	view := current.View()
+	for _, expected := range []string{"LIVE FIREWALL RULES", "sudo iptables -t nat -L IPTUI_DNAT -n -v --line-numbers", "IPTUI_DNAT  1 rules, 1 with traffic", ":25565 -> 10.66.0.2:25565", "tcp", "PACKETS", "2.5 KB", "R   refresh", "T   raw output"} {
+		if !strings.Contains(view, expected) {
+			t.Errorf("live screen missing %q:\n%s", expected, view)
+		}
+	}
+	raw, _ := current.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	if view := raw.(model).View(); !strings.Contains(view, "Chain IPTUI_DNAT (1 references)") || !strings.Contains(view, "to:10.66.0.2:25565") || !strings.Contains(view, "T   table") {
+		t.Fatalf("T should show the raw iptables output:\n%s", view)
+	}
+	if _, refresh := current.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); refresh == nil {
+		t.Fatal("R should refresh the live rules")
+	}
+	updated, _ = current.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).activeScreen != listScreen {
+		t.Fatal("ESC should return to the rules")
+	}
+	menu, _ := press(t, model{width: 100, height: 40}, "m")
+	if !strings.Contains(menu.View(), "Live firewall rules") {
+		t.Fatal("the More menu should offer the live rules")
+	}
+}
+
+func TestBackupImportAndFolderFromTUI(t *testing.T) {
+	directory := t.TempDir()
+	database, err := store.Open(filepath.Join(directory, "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.Add(ctx, store.Rule{PublicPort: 80, DestIP: "10.0.0.2", DestPort: 80, Protocol: "tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	exported := filepath.Join(directory, "from-my-pc.db")
+	if err := database.Backup(ctx, exported); err != nil {
+		t.Fatal(err)
+	}
+	manager := &backup.Manager{Store: database, Dir: filepath.Join(directory, "backups")}
+	current := model{width: 100, height: 30, activeScreen: backupScreen, backups: manager}
+	if !strings.Contains(current.View(), "Saved in "+manager.Folder()) {
+		t.Fatalf("the backups screen should show the folder:\n%s", current.View())
+	}
+	updated, _ := current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	current = updated.(model)
+	for _, character := range exported {
+		updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{character}})
+		current = updated.(model)
+	}
+	if !strings.Contains(current.View(), "Import a backup file") {
+		t.Fatalf("the import prompt should be visible:\n%s", current.View())
+	}
+	updated, command := current.updateBackups(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = updated.(model).Update(command())
+	if current = updated.(model); !strings.Contains(current.message, "Imported from-my-pc.db (1 rules)") {
+		t.Fatalf("import result: %q", current.message)
+	}
+	if backups, _ := manager.List(); len(backups) != 1 || backups[0].Kind != backup.Uploaded {
+		t.Fatalf("the imported file should be listed: %+v", backups)
+	}
+
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	current = typeIntoPrompt(t, updated.(model), "/no/such/file.db")
+	updated, command = current.updateBackups(tea.KeyMsg{Type: tea.KeyEnter})
+	if updated, _ = updated.(model).Update(command()); !strings.Contains(updated.(model).message, "no such file") {
+		t.Fatalf("a missing file should be reported: %q", updated.(model).message)
+	}
+	current = updated.(model)
+
+	target := filepath.Join(directory, "home", "iptable-ui-backups")
+	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	current = updated.(model)
+	current.prompt.value = ""
+	current = typeIntoPrompt(t, current, target)
+	updated, command = current.updateBackups(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = updated.(model).Update(command())
+	if manager.Folder() != target || !strings.Contains(updated.(model).message, "Backups are now saved in "+target) {
+		t.Fatalf("folder change: %q, message %q", manager.Folder(), updated.(model).message)
+	}
+}
+
+func typeIntoPrompt(t *testing.T, current model, text string) model {
+	t.Helper()
+	for _, character := range text {
+		updated, _ := current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{character}})
+		current = updated.(model)
+	}
+	return current
+}
+
+type memorySettings map[string]string
+
+func (s memorySettings) Setting(_ context.Context, key string) (string, error) { return s[key], nil }
+func (s memorySettings) SetSetting(_ context.Context, key, value string) error {
+	s[key] = value
+	return nil
+}
+
+func TestLookToggleCyclesAndSaves(t *testing.T) {
+	defer applyTheme(tuiThemes[0])
+	settings := memorySettings{}
+	current := model{width: 100, height: 40, settings: settings, themeName: "classic"}
+	seen := []string{}
+	for range len(tuiThemes) {
+		updated, command := current.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+		current = updated.(model)
+		if command != nil {
+			command()
+		}
+		seen = append(seen, settings[themeSetting])
+	}
+	if strings.Join(seen, ",") != "readable,light,ocean,plain,classic" {
+		t.Fatalf("O should step through every look and save each: %v", seen)
+	}
+	menu, _ := press(t, current, "m")
+	if !strings.Contains(menu.View(), "TUI look: Classic (next: Readable)") {
+		t.Fatalf("the More menu should offer the next look:\n%s", menu.View())
+	}
+}
+
+func TestPlainLookHasNoColors(t *testing.T) {
+	defer applyTheme(tuiThemes[0])
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	applyTheme(findTheme("plain"))
+	view := (model{width: 80, height: 24, rules: searchRules()}).View()
+	if strings.Contains(view, "\x1b[38;") || strings.Contains(view, "\x1b[48;") {
+		t.Fatal("the plain look must not use any colors")
+	}
+	applyTheme(findTheme("readable"))
+	if colored := (model{width: 80, height: 24, rules: searchRules()}).View(); !strings.Contains(colored, "\x1b[") {
+		t.Fatal("other looks use colors")
+	}
+}
+
+type fakeTraffic struct{ snapshot traffic.Snapshot }
+
+func (f fakeTraffic) Snapshot() traffic.Snapshot { return f.snapshot }
+
+func TestTrafficShowsInHeaderAndRuleMenu(t *testing.T) {
+	snapshot := traffic.Snapshot{
+		Adapters: []traffic.Adapter{{Name: "ens3", Rate: traffic.Rate{InPerSecond: 1_200_000, OutPerSecond: 340_000}}},
+		Forwards: map[traffic.Forward]traffic.Rate{{PublicPort: 25565, Protocol: "tcp", DestIP: "10.66.0.2"}: {InPerSecond: 1500, OutPerSecond: 300_000}},
+	}
+	current := model{width: 100, height: 30, traffic: fakeTraffic{snapshot}}
+	current.updateRules(searchRules())
+	updated, _ := current.Update(current.loadTraffic())
+	current = updated.(model)
+	if view := current.View(); !strings.Contains(view, "ENS3 RX 1.2 MB/s TX 340 KB/s") {
+		t.Fatalf("the header should show adapter speeds:\n%s", view)
+	}
+	updated, _ = current.updateList(tea.KeyMsg{Type: tea.KeyEnter})
+	if view := updated.(model).View(); !strings.Contains(view, "▼ 1.5 KB/s ▲ 300 KB/s") {
+		t.Fatalf("the rule menu should show the rule's speed:\n%s", view)
+	}
+}
+
+func TestReadableCounter(t *testing.T) {
+	for value, want := range map[string]string{"0": "0 B", "2520": "2.5 KB", "73K": "73 KB", "1.2M": "1.2 MB", "odd": "odd"} {
+		if got := readableCounter(value); got != want {
+			t.Errorf("readableCounter(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
+
+func TestSimpleViewToggleSavesAndReadsPlainly(t *testing.T) {
+	settings := memorySettings{}
+	current := model{width: 80, height: 24, settings: settings, webControl: &testWebControl{enabled: true},
+		systemStatus: &system.Status{Forwarding: false, PublicInterface: "ens3", VPNInterface: "tailscale0", VPNUp: true, VPNKind: "Tailscale", VPNAddress: "100.64.0.1", BootRestore: true}, system: &testSystem{}}
+	current.updateRules(searchRules())
+	updated, command := current.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	current = updated.(model)
+	command()
+	if !current.simple || settings[viewSetting] != "simple" {
+		t.Fatalf("N should switch to the simple view and save it: %v %v", current.simple, settings)
+	}
+	view := current.View()
+	for _, expected := range []string{"Forwarding is off, so forwards do not work", "Connected through Tailscale (this server is 100.64.0.1 on it).", "After a reboot: your rules come back automatically.", "On   Minecraft", "port 25565 → 10.66.0.2:25565", "port 8080 → 10.66.0.3:80", "TCP+UDP", "Web UI is on"} {
+		if !strings.Contains(view, expected) {
+			t.Errorf("simple view missing %q:\n%s", expected, view)
+		}
+	}
+	if strings.Contains(view, "ROUTE") || strings.Contains(view, "masked") || strings.Contains(view, "temp••••") {
+		t.Fatalf("the simple view should hide codes and the token:\n%s", view)
+	}
+	updated, command = current.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	command()
+	if updated.(model).simple || settings[viewSetting] != "detailed" || !strings.Contains(updated.(model).View(), "ROUTE") {
+		t.Fatal("N again should return to the detailed view and save it")
+	}
+}
+
+func TestSimpleViewFitsAnyTerminalSize(t *testing.T) {
+	for _, width := range []int{20, 30, 40, 59, 60, 80, 120} {
+		for _, height := range []int{8, 12, 24, 40} {
+			current := model{width: width, height: height, simple: true, webControl: &testWebControl{enabled: true}, message: "Rule saved and applied.",
+				systemStatus: &system.Status{PublicInterface: "ens3", VPNInterface: "wg0", VPNKind: "WireGuard"}, system: &testSystem{}}
+			current.updateRules(searchRules())
+			lines := strings.Split(current.listView(), "\n")
+			if len(lines) > height {
+				t.Errorf("%dx%d: %d lines", width, height, len(lines))
+			}
+			for _, text := range lines {
+				if lipgloss.Width(text) > width {
+					t.Errorf("%dx%d: line %d wide", width, height, lipgloss.Width(text))
+				}
 			}
 		}
 	}
