@@ -215,6 +215,35 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		// Say what is about to happen before anything is imported or removed:
+		// the full explanation on the first run, and newly found forwards later.
+		if command == "tui" {
+			seen, err := database.Setting(context.Background(), introSetting)
+			if err != nil {
+				return err
+			}
+			firstRun := seen == ""
+			if legacy := legacyRules(discovered); firstRun || len(legacy) > 0 {
+				takeoverNotice(os.Stdout, firstRun, legacy, config.publicIF, manager.BackupDir)
+				question := "Take them over?"
+				if firstRun {
+					question = "Continue?"
+				}
+				if term.IsTerminal(os.Stdin.Fd()) && !confirmPrompt(question) {
+					if firstRun {
+						fmt.Println("Nothing was changed. Run iptable-ui again when you are ready.")
+						return nil
+					}
+					fmt.Println("Leaving those forwards alone for now. They will be offered again next time.")
+					discovered = withoutLegacy(discovered)
+				}
+				if firstRun {
+					if err := database.SetSetting(context.Background(), introSetting, "1"); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		foundRules := make([]store.Rule, 0, len(discovered))
 		for _, existing := range discovered {
 			foundRules = append(foundRules, existing.Rule)

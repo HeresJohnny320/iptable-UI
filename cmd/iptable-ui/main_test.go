@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
+	"github.com/HeresJohnny320/iptable-ui/internal/firewall"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
 )
 
@@ -158,5 +160,48 @@ func TestBackupFolderIsMovedOnceThenRemembered(t *testing.T) {
 	again := &backup.Manager{Store: database, Dir: filepath.Join(directory, "db-backups")}
 	if err := useBackupFolder(database, again); err != nil || again.Folder() != want {
 		t.Fatalf("saved folder not reused: %q %v", again.Folder(), err)
+	}
+}
+
+func TestTakeoverNotice(t *testing.T) {
+	legacy := []firewall.ExistingRule{
+		{Rule: store.Rule{PublicPort: 25565, DestIP: "10.66.0.2", DestPort: 25565, Protocol: "tcp"}, Legacy: true, AnyCount: 1},
+		{Rule: store.Rule{PublicPort: 8080, DestIP: "10.66.0.3", DestPort: 80, Protocol: "tcp"}, Legacy: true, Count: 1},
+	}
+	discovered := append([]firewall.ExistingRule{{Rule: store.Rule{PublicPort: 443, DestIP: "10.66.0.4", DestPort: 443, Protocol: "tcp"}}}, legacy...)
+	if got := legacyRules(discovered); len(got) != 2 {
+		t.Fatalf("only other tools' forwards are legacy: %+v", got)
+	}
+	if kept := withoutLegacy(discovered); len(kept) != 1 || kept[0].Rule.PublicPort != 443 {
+		t.Fatalf("declining must keep only iptable-ui's own forwards: %+v", kept)
+	}
+
+	var first strings.Builder
+	takeoverNotice(&first, true, legacy, "ens3", "/var/lib/iptable-ui/backups")
+	for _, expected := range []string{
+		"Before iptable-ui starts",
+		"older scripts that manage those forwards will not find them",
+		"remove rules by line number may remove the",
+		"Docker, ufw or Tailscale",
+		"/var/lib/iptable-ui/backups",
+		"Found 2 port forward(s) made by another tool",
+		"25565/tcp -> 10.66.0.2:25565 (any adapter)",
+		"8080/tcp -> 10.66.0.3:80 (on ens3)",
+	} {
+		if !strings.Contains(first.String(), expected) {
+			t.Errorf("first-run notice missing %q:\n%s", expected, first.String())
+		}
+	}
+
+	var later strings.Builder
+	takeoverNotice(&later, false, legacy[:1], "ens3", "/var/lib/iptable-ui/backups")
+	if strings.Contains(later.String(), "Before iptable-ui starts") || !strings.Contains(later.String(), "Found 1 new port forward(s)") {
+		t.Fatalf("later runs should only mention the new forwards:\n%s", later.String())
+	}
+
+	var empty strings.Builder
+	takeoverNotice(&empty, true, nil, "ens3", "/var/lib/iptable-ui/backups")
+	if !strings.Contains(empty.String(), "nothing will be imported") {
+		t.Fatalf("with nothing found the notice should say so:\n%s", empty.String())
 	}
 }

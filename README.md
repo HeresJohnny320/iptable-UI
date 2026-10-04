@@ -68,6 +68,11 @@ iptable-ui
 You don't need to type `sudo`. iptable-ui changes the firewall, so when it needs root it re-runs
 itself with `sudo` (or `doas`) and asks for your password.
 
+The very first time, before it touches anything, it explains what it's about to do to your
+firewall and lists any port forwards it found from other scripts. Those get taken over, which
+means older scripts may stop working (more on that further down). Answer `n` and nothing is
+changed. Later on it only asks again if it finds new forwards from another tool.
+
 On startup it:
 
 - works out which adapter faces the internet and which one is your VPN, and prints both,
@@ -290,8 +295,12 @@ in its own rules and removes the old copies, so nothing runs twice. A TCP rule a
 the same port and destination become one TCP+UDP rule. Rules it doesn't recognize, like ones with
 extra conditions or comments, are left alone.
 
-Once iptable-ui manages a server, stop using the old script there. The script can't see
+You'll see the list of forwards it's about to take over before anything happens, and you can say
+no. If you say yes, stop using the old script on that server afterwards. The script can't see
 iptable-ui's rules, and removing rules by line number will hit the wrong ones.
+
+Changed your mind? A copy of the full firewall is saved before every change in
+`/var/lib/iptable-ui/backups/`. Put one back with `sudo iptables-restore < <file>`.
 
 ## Commands and options
 
