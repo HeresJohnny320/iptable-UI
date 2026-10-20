@@ -152,6 +152,7 @@ These work too, and they're all in the `M` menu:
 | `N` | Simple or detailed view |
 | `O` | Change the colors |
 | `X` | Remove every rule (you have to type `REMOVE ALL`) |
+| `Z` | Trusted HTTPS certificate from Let's Encrypt on/off (no more browser warning) |
 | `G` | WireGuard setup |
 | `U` | Classic whiptail menus |
 
@@ -203,7 +204,37 @@ only asks once. To change it later, start with `--tls-email you@example.com`. Ha
 `--tls-cert fullchain.pem --tls-key privkey.pem`. Want plain HTTP, say behind your own reverse
 proxy? Start with `--http`.
 
+### Getting rid of the browser warning
+
+Press `Z` in the TUI (it's in the `M` menu too), flip "Trusted certificate (Let's Encrypt)" under
+Settings in the web UI, or start once with `--letsencrypt`. iptable-ui then gets a free
+certificate from Let's Encrypt for your server's public IP. You don't need a domain name, and
+you don't need an email address either: iptable-ui doesn't send one. Once it
+arrives, usually within a minute, browsers open the web UI without any warning. The choice is
+saved, so it stays on.
+
+A few things have to be true for it to work:
+
+- Port 80 must reach the VPS. Let's Encrypt checks that you control the IP by fetching a file
+  from it on port 80. Allow port 80 in your VPS provider's firewall.
+- Port 80 can't be forwarded to your home server. If one of your rules forwards public port 80,
+  iptable-ui tells you which one and keeps the self-signed certificate. Switch that rule off while
+  the certificate is requested, or use a domain with your own certificate.
+- The server needs its public IP on its own network adapter. Some providers (AWS, Oracle Cloud)
+  give the server a private address and put the public one in front of it. In that case, point a
+  domain at the public IP and use `--letsencrypt --domain vps.example.org`.
+
+Certificates for an IP address only last about six days. iptable-ui renews them on its own every
+four days or so while it's running. If it was off for longer, it gets a fresh one the next time
+it starts. With `--domain` you get a normal 90-day certificate instead. Until a trusted
+certificate is ready, and if something goes wrong, the web UI keeps working with the self-signed
+one. The `M` menu and the Settings section show why. Turning it on means you agree to the
+[Let's Encrypt Subscriber Agreement](https://letsencrypt.org/repository/).
+
 ### Checking the certificate
+
+You only need this while the web UI uses the self-signed certificate.
+
 
 A browser warning on your first visit is expected, because nobody signed the certificate except
 your own server. The catch is that someone intercepting your connection would cause the exact
@@ -230,9 +261,6 @@ they don't match, close the page: something between you and the server swapped t
 iptable-ui also tells you at startup when the certificate is new, for example after your
 server's IP changed. That's the only time a warning should come back. **If your browser warns
 again and iptable-ui didn't say the certificate is new, don't continue.**
-
-Have a domain name pointing at the VPS? Then a real certificate (for example from Let's Encrypt)
-via `--tls-cert` and `--tls-key` avoids the warning altogether.
 
 **Please don't leave it wide open anyway.** Either bind it to localhost with
 `--web-address 127.0.0.1:8787` and reach it over an SSH tunnel
@@ -363,6 +391,8 @@ Changed your mind? A copy of the full firewall is saved before every change in
 | `--no-web` | Don't start the web UI |
 | `--http` | Serve the web UI over plain HTTP instead of HTTPS |
 | `--tls-email you@example.com` | Change the email in the self-signed certificate (asked on first run, default `admin@admin.com`) |
+| `--letsencrypt` / `--no-letsencrypt` | Turn the trusted Let's Encrypt certificate on or off (saved) |
+| `--domain vps.example.org` | Certify this domain instead of the public IP (saved) |
 | `--tls-cert FILE --tls-key FILE` | Use your own HTTPS certificate |
 | `--whiptail` | Start in whiptail mode |
 | `--no-wizard` | Don't offer the setup wizard |

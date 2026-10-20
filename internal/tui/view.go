@@ -617,6 +617,7 @@ var helpTopics = []struct{ section, key, title, text string }{
 	{"OTHER", "W", "Web UI", "Starts or stops the browser interface. Sign in with the TOKEN shown at the top."},
 	{"OTHER", "N", "Simple or detailed view", "Simple shows plain sentences and fewer details; detailed shows interface names, codes and columns. Saved for next time."},
 	{"OTHER", "V", "Show web address, token and certificate", "Shows what is masked on screen, plus the web UI's HTTPS certificate fingerprint. The first time your browser warns about the certificate, open its certificate details and check the SHA-256 fingerprint matches. If it does not, someone may be intercepting the connection."},
+	{"OTHER", "Z", "Trusted HTTPS certificate", "Gets a free certificate from Let's Encrypt for this server's IP (or --domain), so browsers stop warning about the web UI. Let's Encrypt checks the server on port 80, so port 80 must be open and not forwarded. It renews by itself while iptable-ui runs."},
 	{"OTHER", "O", "TUI look", "Switches between Classic, Readable (bright, high contrast), Light terminal (for white backgrounds), Ocean and Plain (no colors, for monochrome terminals and screen readers). Saved for next time."},
 	{"OTHER", "U", "Whiptail look", "Switches to classic blue whiptail menus (like raspi-config). Needs the whiptail package: apt install whiptail (Fedora: dnf install newt). Choose \"Switch to the full TUI\" there to come back."},
 	{"OTHER", "Q", "Quit", "Your rules keep working after you quit."},
@@ -866,6 +867,12 @@ func (m model) tokenLine() string {
 		hint = "  C copy sign-in link  V hide"
 	}
 	tokenLine := labelStyle.Render("TOKEN ") + publicStyle.Render(token) + mutedStyle.Render(hint)
+	if m.reveal && m.certificates != nil {
+		if status := m.certificates.Status(); status.Enabled && status.Ready {
+			// A trusted certificate needs no checking: browsers verify it.
+			return tokenLine + "\n" + labelStyle.Render("CERT ") + enabledStyle.Render("trusted (Let's Encrypt, until "+status.NotAfter.Local().Format("2006-01-02")+")")
+		}
+	}
 	if fingerprint := m.webControl.Fingerprint(); m.reveal && fingerprint != "" {
 		// Compare with the browser's certificate details before accepting it.
 		tokenLine += "\n" + labelStyle.Render("CERT SHA-256 ") + addressStyle.Render(fingerprint)

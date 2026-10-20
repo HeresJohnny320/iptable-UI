@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HeresJohnny320/iptable-ui/internal/acmecert"
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
@@ -123,6 +124,7 @@ type model struct {
 	traffic      TrafficSource
 	trafficNow   traffic.Snapshot
 	settings     Settings
+	certificates CertificateControl
 	themeName    string
 	// simple shows plain sentences instead of the detailed codes and columns.
 	simple       bool
@@ -218,6 +220,14 @@ type Settings interface {
 	SetSetting(context.Context, string, string) error
 }
 
+// CertificateControl turns the browser-trusted (Let's Encrypt) certificate
+// on and off.
+type CertificateControl interface {
+	Enabled() bool
+	SetEnabled(bool) error
+	Status() acmecert.Status
+}
+
 // Options are what the TUI manages. A nil field turns its feature off.
 type Options struct {
 	Service       app.Service
@@ -227,6 +237,7 @@ type Options struct {
 	Backups       BackupControl
 	Traffic       TrafficSource
 	Settings      Settings
+	Certificates  CertificateControl
 	AllowWhiptail bool
 }
 
@@ -253,7 +264,7 @@ func Run(options Options) (bool, error) {
 		}
 	}
 	program := tea.NewProgram(model{service: options.Service, webControl: options.Web, wgSetup: options.WireGuard, system: options.Host, backups: options.Backups,
-		traffic: options.Traffic, settings: options.Settings, themeName: theme.name, simple: simple, allowWhiptail: options.AllowWhiptail}, tea.WithAltScreen())
+		traffic: options.Traffic, settings: options.Settings, certificates: options.Certificates, themeName: theme.name, simple: simple, allowWhiptail: options.AllowWhiptail}, tea.WithAltScreen())
 	final, err := program.Run()
 	if err != nil {
 		return false, err
@@ -504,6 +515,20 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "l":
 		m.message = "Reading the firewall..."
 		return m, m.loadLive
+	case "z":
+		if m.certificates == nil {
+			m.message = "A trusted certificate needs the web UI on HTTPS with its own certificate (not --http or --tls-cert)."
+			break
+		}
+		certificates := m.certificates
+		if certificates.Enabled() {
+			return m, m.perform("Trusted certificate turned off; the self-signed one is used again", func(context.Context) error { return certificates.SetEnabled(false) })
+		}
+		identifier := certificates.Status().Identifier
+		m.confirm = &pendingAction{success: "Requesting a trusted certificate from Let's Encrypt in the background", action: func(context.Context) (string, error) {
+			return "This usually takes under a minute; its status is under M. Browsers stop warning once it is ready", certificates.SetEnabled(true)
+		}}
+		m.message = fmt.Sprintf("Get a browser-trusted certificate from Let's Encrypt for %s? Let's Encrypt checks this server on port 80, so port 80 must be open and not forwarded. You agree to the Let's Encrypt Subscriber Agreement (%s). Press y to confirm, any other key to cancel.", identifier, acmecert.SubscriberAgreement)
 	case "n":
 		m.simple = !m.simple
 		view, message := "detailed", "Detailed view: interface names, codes and columns. Press N for the simple view."
@@ -981,6 +1006,10 @@ func (m model) moreMenu() *menu {
 			menuItem{"p", "Web UI port", "move the web UI to another port"},
 		)
 	}
+	if m.certificates != nil {
+		label, hint := certificateMenu(m.certificates.Status())
+		items = append(items, menuItem{"z", label, hint})
+	}
 	items = append(items, menuItem{"x", "Remove all rules", "type REMOVE ALL to confirm; backed up first"})
 	// WireGuard setup only matters when WireGuard is the VPN, or none is up.
 	if m.systemStatus == nil || m.systemStatus.VPNKind == "WireGuard" || !m.systemStatus.VPNUp {
@@ -1018,6 +1047,22 @@ func (m model) ruleSpeed(rule store.Rule) string {
 		return ""
 	}
 	return fmt.Sprintf("  ▼ %s ▲ %s", traffic.FormatRate(rate.InPerSecond), traffic.FormatRate(rate.OutPerSecond))
+}
+
+// certificateMenu describes the trusted certificate for the More menu.
+func certificateMenu(status acmecert.Status) (label, hint string) {
+	switch {
+	case !status.Enabled:
+		return "Trusted HTTPS certificate: turn on", "Let's Encrypt, so browsers stop warning"
+	case status.Ready:
+		return "Trusted HTTPS certificate: on (turn off)", "valid until " + status.NotAfter.Local().Format("2006-01-02") + ", renews by itself"
+	case status.Working:
+		return "Trusted HTTPS certificate: on (turn off)", "requesting it from Let's Encrypt..."
+	case status.Error != "":
+		return "Trusted HTTPS certificate: on (turn off)", "not yet: " + status.Error
+	default:
+		return "Trusted HTTPS certificate: on (turn off)", "waiting to request it"
+	}
 }
 
 // offOn names the state a toggle switches to.

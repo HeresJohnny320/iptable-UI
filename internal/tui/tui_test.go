@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/HeresJohnny320/iptable-ui/internal/acmecert"
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
@@ -1296,6 +1297,55 @@ func TestRevealShowsCertificateFingerprint(t *testing.T) {
 	copied, _ := press(t, model{webControl: web}, "c")
 	if !strings.Contains(copied.message, "check its fingerprint") {
 		t.Fatalf("copying the link should mention checking the certificate: %q", copied.message)
+	}
+}
+
+type fakeCertificates struct{ status acmecert.Status }
+
+func (f *fakeCertificates) Enabled() bool { return f.status.Enabled }
+func (f *fakeCertificates) SetEnabled(on bool) error {
+	f.status.Enabled = on
+	return nil
+}
+func (f *fakeCertificates) Status() acmecert.Status { return f.status }
+
+func TestTrustedCertificateKey(t *testing.T) {
+	certificates := &fakeCertificates{status: acmecert.Status{Identifier: "203.0.113.5"}}
+	current := model{width: 120, height: 40, certificates: certificates, webControl: &testWebControl{enabled: true, fingerprint: "AB:CD"}}
+	menu, _ := press(t, current, "m")
+	if !strings.Contains(menu.View(), "Trusted HTTPS certificate: turn on") {
+		t.Fatalf("the More menu should offer it:\n%s", menu.View())
+	}
+	current, command := press(t, current, "z")
+	if command != nil || current.confirm == nil || !strings.Contains(current.message, "port 80") || !strings.Contains(current.message, "Subscriber Agreement") {
+		t.Fatalf("turning it on should explain and ask first: %q", current.message)
+	}
+	current, command = press(t, current, "y")
+	if finished := command().(actionFinished); finished.err != nil || !certificates.status.Enabled || !strings.Contains(finished.message, "in the background") {
+		t.Fatalf("y should turn it on: %+v", finished)
+	}
+	for status, want := range map[acmecert.Status]string{
+		{Enabled: true, Working: true}:              "requesting it",
+		{Enabled: true, Error: "port 80 is closed"}: "not yet: port 80 is closed",
+		{Enabled: true, Ready: true}:                "renews by itself",
+	} {
+		certificates.status = status
+		if _, hint := certificateMenu(certificates.Status()); !strings.Contains(hint, want) {
+			t.Errorf("status %+v: hint %q should contain %q", status, hint, want)
+		}
+	}
+	certificates.status = acmecert.Status{Enabled: true, Ready: true}
+	current.reveal = true
+	if view := current.View(); !strings.Contains(view, "CERT trusted (Let's Encrypt") || strings.Contains(view, "AB:CD") {
+		t.Fatalf("with a trusted certificate there is no fingerprint to check:\n%s", view)
+	}
+	_, command = press(t, current, "z")
+	command()
+	if certificates.status.Enabled {
+		t.Fatal("Z again should turn it off at once")
+	}
+	if none, _ := press(t, model{}, "z"); !strings.Contains(none.message, "needs the web UI on HTTPS") {
+		t.Fatalf("without HTTPS Z should explain: %q", none.message)
 	}
 }
 

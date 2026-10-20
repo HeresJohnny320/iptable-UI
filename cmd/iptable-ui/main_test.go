@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
+	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -276,5 +278,63 @@ func TestExplainCertificateSaysWhenItIsNew(t *testing.T) {
 	_ = explainCertificate(&own, database, "EE:FF", true)
 	if !strings.Contains(own.String(), "EE:FF") || strings.Contains(own.String(), "warn") {
 		t.Fatalf("your own trusted certificate needs no warning:\n%s", own.String())
+	}
+}
+
+type noFirewall struct{}
+
+func (noFirewall) Reconcile(context.Context, []store.Rule) error { return nil }
+
+func TestLetsEncryptPreflight(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := app.Service{Store: database, Firewall: noFirewall{}}
+	if err := letsEncryptPreflight(service, "203.0.113.5")(); err != nil {
+		t.Fatalf("a public IP with nothing on port 80 is fine: %v", err)
+	}
+	for _, private := range []string{"10.0.0.5", "192.168.1.20", "127.0.0.1"} {
+		if err := letsEncryptPreflight(service, private)(); err == nil || !strings.Contains(err.Error(), "--domain") {
+			t.Errorf("%s should be refused with advice, got %v", private, err)
+		}
+	}
+	if _, err := service.Add(context.Background(), store.Rule{PublicPort: 80, DestIP: "10.66.0.3", DestPort: 8080, Protocol: "udp"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := letsEncryptPreflight(service, "203.0.113.5")(); err != nil {
+		t.Fatalf("a UDP-only rule on port 80 does not get in the way: %v", err)
+	}
+	web, err := service.Add(context.Background(), store.Rule{PublicPort: 80, DestIP: "10.66.0.2", DestPort: 80, Protocol: "tcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := letsEncryptPreflight(service, "203.0.113.5")(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("rule #%d", web.ID)) {
+		t.Fatalf("a forward on port 80 should be named, got %v", err)
+	}
+	if _, err := service.SetEnabled(context.Background(), web.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := letsEncryptPreflight(service, "203.0.113.5")(); err != nil {
+		t.Fatalf("a switched-off forward does not get in the way: %v", err)
+	}
+}
+
+func TestLetsEncryptFlags(t *testing.T) {
+	on, err := parseOptions("tui", []string{"--public-if", "ens3", "--letsencrypt", "--domain", "vps.example.org"})
+	if err != nil || on.letsEncrypt != "on" || on.domain != "vps.example.org" {
+		t.Fatalf("%+v %v", on, err)
+	}
+	if off, err := parseOptions("tui", []string{"--public-if", "ens3", "--no-letsencrypt"}); err != nil || off.letsEncrypt != "off" {
+		t.Fatalf("%+v %v", off, err)
+	}
+	if unset, _ := parseOptions("tui", []string{"--public-if", "ens3"}); unset.letsEncrypt != "" {
+		t.Fatal("without a flag the saved choice applies")
+	}
+	for _, args := range [][]string{{"--letsencrypt", "--no-letsencrypt"}, {"--letsencrypt", "--http"}, {"--letsencrypt", "--tls-cert", "a", "--tls-key", "b"}} {
+		if _, err := parseOptions("tui", append([]string{"--public-if", "ens3"}, args...)); err == nil {
+			t.Errorf("%v should be refused", args)
+		}
 	}
 }

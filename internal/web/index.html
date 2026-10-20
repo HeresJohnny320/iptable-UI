@@ -94,6 +94,9 @@
     .live-raw summary { cursor: pointer; color: var(--muted); font-size: 13px; }
     #live-panel .setup-body { max-width: none; }
     .port-row { max-width: 360px; grid-template-columns: minmax(0, 1fr) auto; display: grid; align-items: end; gap: 10px; }
+    .trusted-cert { margin-top: 22px; border-top: 2px solid var(--table-top); }
+    .trusted-cert[hidden] { display: none; }
+    .host-help a { color: inherit; }
     .danger-zone { margin-top: 22px; padding: 14px 16px; border: 1px solid var(--danger); border-radius: 4px; }
     .danger-zone h3 { margin: 0 0 4px; color: var(--danger); font-family: Georgia, serif; font-size: 18px; font-weight: 500; }
     .button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
@@ -282,6 +285,9 @@
           <button class="button" type="submit">Move backups</button>
         </form>
         <p class="sub">Existing backups move to the new folder. A folder inside a user's home (such as <code>/home/ubuntu/iptable-ui-backups</code>) is owned by that user, so they can download backups without root.</p>
+        <div class="trusted-cert" id="trusted-cert" hidden>
+          <div class="host-item"><div><span class="host-label" id="trusted-label">Trusted certificate (Let's Encrypt)</span><span class="host-value" id="trusted-state"></span><span class="host-help">A free certificate for this server's IP, so browsers stop warning. Let's Encrypt checks the server on port 80, so port 80 must be open and not forwarded. Turning it on means you agree to the <a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener noreferrer">Let's Encrypt Subscriber Agreement</a>.</span></div><button class="switch" id="trusted-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="trusted-label"></button></div>
+        </div>
         <div class="danger-zone">
           <h3>Remove all rules</h3>
           <p class="sub">Deletes every forwarding rule and removes it from the firewall at once. A backup is taken first, so you can undo this from <strong>Backups</strong>.</p>
@@ -318,6 +324,7 @@
         const settings = await api('/api/settings');
         applyTheme(settings.theme);
         if (settings.port) document.querySelector('#web-port').value = settings.port;
+        renderTrustedCert(settings.trustedCert);
         if (settings.backupDir) { document.querySelector('#backup-dir').value = settings.backupDir; document.querySelector('#backup-folder').textContent = settings.backupDir; }
       } catch (_) {}
     }
@@ -632,6 +639,30 @@
       try { await api('/api/backups', { method: 'POST' }); message('Backup saved.'); await loadBackups(); }
       catch (error) { message(error.message); }
       finally { button.disabled = false; button.textContent = 'Back up now'; }
+    };
+    const trustedToggle = document.querySelector('#trusted-toggle');
+    // renderTrustedCert shows whether a browser-trusted certificate is in use.
+    function renderTrustedCert(status) {
+      document.querySelector('#trusted-cert').hidden = !status;
+      if (!status) return;
+      let text = 'Off · the self-signed certificate is used';
+      if (status.enabled && status.ready) text = `On · valid until ${new Date(status.notAfter).toLocaleDateString()}, renews by itself`;
+      else if (status.enabled && status.working) text = 'On · requesting it from Let\'s Encrypt…';
+      else if (status.enabled && status.error) text = `On · not yet: ${status.error}`;
+      else if (status.enabled) text = 'On · waiting to request it';
+      showHostValue('#trusted-state', status.enabled && status.ready, text);
+      trustedToggle.setAttribute('aria-checked', String(status.enabled));
+    }
+    trustedToggle.onclick = async () => {
+      const enabled = trustedToggle.getAttribute('aria-checked') !== 'true';
+      if (enabled && !confirm('Get a free browser-trusted certificate from Let\'s Encrypt?\n\nLet\'s Encrypt checks this server on port 80, so port 80 must be open and not forwarded. You agree to the Let\'s Encrypt Subscriber Agreement (https://letsencrypt.org/repository/).')) return;
+      trustedToggle.disabled = true;
+      try {
+        renderTrustedCert(await api('/api/settings/trusted-cert', { method: 'PUT', body: JSON.stringify({ enabled }) }));
+        message(enabled ? 'Requesting a trusted certificate in the background. This usually takes under a minute; reload the page once it is ready.' : 'Trusted certificate turned off; the self-signed one is used again.');
+        if (enabled) setTimeout(loadSettings, 15000);
+      } catch (error) { message(error.message); }
+      finally { trustedToggle.disabled = false; }
     };
     const uploadFile = document.querySelector('#upload-file');
     document.querySelector('#upload-backup').onclick = () => uploadFile.click();

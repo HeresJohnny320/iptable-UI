@@ -150,3 +150,37 @@ func TestDownloadLinksWorkOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestTrustedCertificateReplacesSelfSignedWithoutRestart(t *testing.T) {
+	selfSigned, err := SelfSignedCert(t.TempDir(), "", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, err := SelfSignedCert(t.TempDir(), "other@example.org", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime("session-secret", "127.0.0.1:0", Services{})
+	runtime.UseTLS(selfSigned)
+	var ready *tls.Certificate
+	runtime.UseTrusted(func() *tls.Certificate { return ready })
+	if _, err := runtime.Toggle(); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	presented := func() string {
+		connection, err := tls.Dial("tcp", runtime.Address(), &tls.Config{InsecureSkipVerify: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		return CertFingerprint(tls.Certificate{Certificate: [][]byte{connection.ConnectionState().PeerCertificates[0].Raw}})
+	}
+	if runtime.Trusted() || presented() != CertFingerprint(selfSigned) || runtime.Fingerprint() != CertFingerprint(selfSigned) {
+		t.Fatal("until the trusted certificate is ready, the self-signed one is served")
+	}
+	ready = &trusted
+	if !runtime.Trusted() || presented() != CertFingerprint(trusted) || runtime.Fingerprint() != CertFingerprint(trusted) {
+		t.Fatal("once ready, the trusted certificate is served on the next connection")
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/HeresJohnny320/iptable-ui/internal/acmecert"
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/firewall"
@@ -57,7 +58,11 @@ type options struct {
 	tlsEmail string
 	tlsCert  string
 	tlsKey   string
-	whiptail bool
+	// letsEncrypt turns the trusted certificate on ("on"), off ("off") or
+	// leaves the saved choice ("") ; domain is certified instead of the IP.
+	letsEncrypt string
+	domain      string
+	whiptail    bool
 }
 
 func main() {
@@ -364,9 +369,21 @@ func run(args []string) error {
 	webRuntime.OnPortChange(func(port int) error {
 		return database.SetSetting(context.Background(), webPortSetting, strconv.Itoa(port))
 	})
+	var certificates *acmecert.Controller
 	if !config.webHTTP {
 		if err := useTLS(webRuntime, database, config); err != nil {
 			return err
+		}
+		if config.tlsCert == "" {
+			if certificates, err = trustedCertificates(database, service, config); err != nil {
+				return err
+			}
+			defer certificates.Stop()
+			webRuntime.UseTrusted(certificates.Certificate)
+			webRuntime.SetCertificates(certificates)
+			if status := certificates.Status(); net.ParseIP(status.Identifier) == nil && status.Identifier != "" {
+				webRuntime.SetLinkHost(status.Identifier) // links must use the certified name
+			}
 		}
 	}
 	if config.webEnabled {
@@ -382,7 +399,7 @@ func run(args []string) error {
 		fmt.Println("Open it signed in:", terminalLink(webRuntime.SignInURL(), web.MaskURL(webRuntime.URL())), " (in the TUI: C copies the link, V shows it)")
 	}
 	if webRuntime.HTTPS() {
-		if err := explainCertificate(os.Stdout, database, webRuntime.Fingerprint(), config.tlsCert != ""); err != nil {
+		if err := explainCertificate(os.Stdout, database, webRuntime.Fingerprint(), config.tlsCert != "" || webRuntime.Trusted()); err != nil {
 			return err
 		}
 	}
@@ -390,12 +407,16 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stderr, "WARNING: this exposes the admin UI over plain HTTP. Restrict the port with a firewall and use a TLS reverse proxy for untrusted networks.")
 	}
 	defer webRuntime.Close()
-	return runInterface(config.whiptail, service, webRuntime, setup, host, backups, monitor, database)
+	var certificateControl tui.CertificateControl
+	if certificates != nil {
+		certificateControl = certificates
+	}
+	return runInterface(config.whiptail, service, webRuntime, setup, host, backups, monitor, database, certificateControl)
 }
 
 // runInterface shows the full TUI or whiptail menus, switching between them
 // whenever the user asks, until they quit.
-func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Runtime, setup wgsetup.SetupManager, host system.Host, backups *backup.Manager, monitor *traffic.Monitor, settings *store.Store) error {
+func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Runtime, setup wgsetup.SetupManager, host system.Host, backups *backup.Manager, monitor *traffic.Monitor, settings *store.Store, certificates tui.CertificateControl) error {
 	whiptailPath, findErr := whiptail.Find()
 	if startInWhiptail && findErr != nil {
 		return findErr
@@ -412,7 +433,7 @@ func runInterface(startInWhiptail bool, service app.Service, webRuntime *web.Run
 			continue
 		}
 		switchToWhiptail, err := tui.Run(tui.Options{Service: service, Web: webRuntime, WireGuard: setup, Host: host, Backups: backups,
-			Traffic: monitor, Settings: settings, AllowWhiptail: findErr == nil})
+			Traffic: monitor, Settings: settings, Certificates: certificates, AllowWhiptail: findErr == nil})
 		if err != nil || !switchToWhiptail {
 			return err
 		}
@@ -462,6 +483,9 @@ func parseOptions(command string, args []string) (options, error) {
 	flags.StringVar(&config.tlsEmail, "tls-email", "", "email put in the self-signed HTTPS certificate (saved; default "+web.DefaultCertEmail+")")
 	flags.StringVar(&config.tlsCert, "tls-cert", "", "your own HTTPS certificate (PEM) instead of the self-signed one; needs --tls-key")
 	flags.StringVar(&config.tlsKey, "tls-key", "", "private key (PEM) for --tls-cert")
+	letsEncryptOn := flags.Bool("letsencrypt", false, "get a browser-trusted HTTPS certificate from Let's Encrypt (saved; needs port 80)")
+	letsEncryptOff := flags.Bool("no-letsencrypt", false, "stop using Let's Encrypt (saved)")
+	flags.StringVar(&config.domain, "domain", "", "domain name for the Let's Encrypt certificate instead of the public IP (saved)")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -478,6 +502,17 @@ func parseOptions(command string, args []string) (options, error) {
 	}
 	if config.webHTTP && (config.tlsCert != "" || config.tlsEmail != "") {
 		return options{}, errors.New("--http cannot be used with --tls-cert, --tls-key or --tls-email")
+	}
+	switch {
+	case *letsEncryptOn && *letsEncryptOff:
+		return options{}, errors.New("--letsencrypt and --no-letsencrypt cannot be used together")
+	case *letsEncryptOn:
+		config.letsEncrypt = "on"
+	case *letsEncryptOff:
+		config.letsEncrypt = "off"
+	}
+	if *letsEncryptOn && (config.webHTTP || config.tlsCert != "") {
+		return options{}, errors.New("--letsencrypt cannot be used with --http or --tls-cert")
 	}
 	if config.publicIF == "" {
 		if detected, err := (system.Host{Runner: firewall.ExecRunner{}}).DetectPublicInterface(context.Background()); err == nil {
@@ -529,6 +564,78 @@ const (
 	webPortSetting     = "web.port"
 	webTLSEmailSetting = "web.tls_email"
 )
+
+const (
+	letsEncryptSetting = "web.letsencrypt"
+	domainSetting      = "web.domain"
+)
+
+// trustedCertificates prepares the Let's Encrypt certificate for the public
+// IP (or --domain), turned on or off by flag or by the saved choice.
+func trustedCertificates(database *store.Store, service app.Service, config options) (*acmecert.Controller, error) {
+	ctx := context.Background()
+	domain := strings.TrimSpace(config.domain)
+	if domain != "" {
+		if err := database.SetSetting(ctx, domainSetting, domain); err != nil {
+			return nil, err
+		}
+	} else if saved, err := database.Setting(ctx, domainSetting); err == nil {
+		domain = saved
+	}
+	identifier := domain
+	if identifier == "" {
+		identifier = interfaceIPv4(config.publicIF)
+	}
+	controller := &acmecert.Controller{
+		// No contact email is sent: Let's Encrypt ended expiry emails in 2025
+		// and now only adds given addresses to its mailing list.
+		Manager: &acmecert.Manager{Dir: filepath.Join(filepath.Dir(config.database), "letsencrypt"),
+			Identifier: identifier, Preflight: letsEncryptPreflight(service, identifier)},
+		Save: func(on bool) error {
+			return database.SetSetting(context.Background(), letsEncryptSetting, map[bool]string{true: "on", false: "off"}[on])
+		},
+	}
+	wanted := config.letsEncrypt
+	if wanted == "" {
+		wanted, _ = database.Setting(ctx, letsEncryptSetting)
+	}
+	if wanted == "on" {
+		if err := controller.SetEnabled(true); err != nil {
+			return nil, err
+		}
+		if status := controller.Status(); status.Ready {
+			fmt.Printf("Trusted certificate from Let's Encrypt for %s, valid until %s. Browsers will not warn.\n", identifier, status.NotAfter.Local().Format("2006-01-02"))
+		} else {
+			fmt.Printf("Requesting a trusted certificate from Let's Encrypt for %s in the background (needs port 80 open). Until it arrives, the self-signed one is used.\n", identifier)
+		}
+	} else if config.letsEncrypt == "off" {
+		if err := controller.SetEnabled(false); err != nil {
+			return nil, err
+		}
+	}
+	return controller, nil
+}
+
+// letsEncryptPreflight catches setups where Let's Encrypt's check on port 80
+// would fail anyway, and says why, instead of wasting the few attempts per
+// hour Let's Encrypt allows.
+func letsEncryptPreflight(service app.Service, identifier string) func() error {
+	return func() error {
+		if ip := net.ParseIP(identifier); ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+			return fmt.Errorf("this server's address %s is private (your provider maps a public IP in front of it), so Let's Encrypt cannot check it; point a domain at the public IP and start with --domain", identifier)
+		}
+		rules, err := service.List(context.Background())
+		if err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			if rule.Enabled && rule.PublicPort == 80 && rule.Protocol != "udp" {
+				return fmt.Errorf("port 80 is forwarded to %s:%d by rule #%d, so Let's Encrypt's check would reach that machine instead of iptable-ui; turn that rule off while the certificate is requested, or keep the self-signed certificate", rule.DestIP, rule.DestPort, rule.ID)
+			}
+		}
+		return nil
+	}
+}
 
 // fingerprintSetting remembers the last certificate shown, to tell the user
 // when the browser is about to see a new one.

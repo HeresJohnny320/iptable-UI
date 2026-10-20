@@ -32,8 +32,11 @@ type Runtime struct {
 	links    map[string]downloadLink
 	// tlsConfig is set when the web UI serves HTTPS; fingerprint identifies
 	// its certificate.
-	tlsConfig   *tls.Config
-	fingerprint string
+	tlsConfig *tls.Config
+	// fallback is the self-signed (or your own) certificate; trusted, when
+	// set and ready, is a browser-trusted one that replaces it.
+	fallback tls.Certificate
+	trusted  func() *tls.Certificate
 }
 
 type downloadLink struct {
@@ -68,16 +71,58 @@ func (r *Runtime) OnPortChange(save func(int) error) {
 func (r *Runtime) UseTLS(cert tls.Certificate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
-	r.fingerprint = CertFingerprint(cert)
+	r.fallback = cert
+	// The certificate is picked for every connection, so a trusted one that
+	// arrives later is used at once, without restarting the web UI.
+	r.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return r.servedCertificate(), nil
+	}}
 }
 
-// Fingerprint is the SHA-256 fingerprint of the HTTPS certificate, or ""
-// when the web UI serves plain HTTP.
-func (r *Runtime) Fingerprint() string {
+// SetCertificates lets the web UI turn the trusted certificate on and off.
+// Call it before the server starts.
+func (r *Runtime) SetCertificates(control CertificateControl) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.fingerprint
+	r.services.Certificates = control
+}
+
+// UseTrusted serves the certificate from source whenever it has one, such
+// as a Let's Encrypt certificate, falling back to the UseTLS certificate.
+func (r *Runtime) UseTrusted(source func() *tls.Certificate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trusted = source
+}
+
+// Trusted reports whether the web UI is serving a browser-trusted
+// certificate from UseTrusted right now.
+func (r *Runtime) Trusted() bool {
+	r.mu.Lock()
+	source := r.trusted
+	r.mu.Unlock()
+	return source != nil && source() != nil
+}
+
+func (r *Runtime) servedCertificate() *tls.Certificate {
+	r.mu.Lock()
+	source, fallback := r.trusted, r.fallback
+	r.mu.Unlock()
+	if source != nil {
+		if cert := source(); cert != nil {
+			return cert
+		}
+	}
+	return &fallback
+}
+
+// Fingerprint is the SHA-256 fingerprint of the certificate being served,
+// or "" when the web UI serves plain HTTP.
+func (r *Runtime) Fingerprint() string {
+	if !r.HTTPS() {
+		return ""
+	}
+	return CertFingerprint(*r.servedCertificate())
 }
 
 // HTTPS reports whether the web UI serves HTTPS.

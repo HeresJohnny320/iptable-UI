@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HeresJohnny320/iptable-ui/internal/acmecert"
 	"github.com/HeresJohnny320/iptable-ui/internal/app"
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
@@ -582,5 +583,46 @@ func TestTrafficAPI(t *testing.T) {
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, `"name":"ens3"`) || !strings.Contains(body, fmt.Sprintf(`"id":%d`, added.ID)) || !strings.Contains(body, `"inPerSecond":1500`) {
 		t.Fatalf("traffic returned %d %s", response.Code, body)
+	}
+}
+
+type fakeCertificates struct{ status acmecert.Status }
+
+func (f *fakeCertificates) Enabled() bool { return f.status.Enabled }
+func (f *fakeCertificates) SetEnabled(on bool) error {
+	f.status.Enabled = on
+	return nil
+}
+func (f *fakeCertificates) Status() acmecert.Status { return f.status }
+
+func TestTrustedCertificateSwitch(t *testing.T) {
+	services, _, _ := newBackupServices(t)
+	certificates := &fakeCertificates{status: acmecert.Status{Identifier: "203.0.113.5"}}
+	services.Certificates = certificates
+	handler := Handler("session-secret", services)
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer session-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if got := send(http.MethodGet, "/api/settings", ""); !strings.Contains(got.Body.String(), `"trustedCert":{"enabled":false`) {
+		t.Fatalf("settings should report the certificate: %s", got.Body.String())
+	}
+	if got := send(http.MethodPut, "/api/settings/trusted-cert", `{"enabled":true}`); got.Code != http.StatusOK || !certificates.status.Enabled {
+		t.Fatalf("turning on returned %d %s", got.Code, got.Body.String())
+	}
+	if got := send(http.MethodPut, "/api/settings/trusted-cert", `{}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("a missing value should be refused, got %d", got.Code)
+	}
+	services.Certificates = nil
+	if got := httptest.NewRecorder(); true {
+		request := httptest.NewRequest(http.MethodPut, "/api/settings/trusted-cert", strings.NewReader(`{"enabled":true}`))
+		request.Header.Set("Authorization", "Bearer session-secret")
+		Handler("session-secret", services).ServeHTTP(got, request)
+		if got.Code != http.StatusNotImplemented {
+			t.Fatalf("without HTTPS the switch is unavailable, got %d", got.Code)
+		}
 	}
 }

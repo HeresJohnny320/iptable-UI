@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/HeresJohnny320/iptable-ui/internal/acmecert"
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/firewall"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
@@ -82,6 +83,14 @@ type Traffic interface {
 	Snapshot() traffic.Snapshot
 }
 
+// CertificateControl turns the browser-trusted (Let's Encrypt) certificate
+// on and off.
+type CertificateControl interface {
+	Enabled() bool
+	SetEnabled(bool) error
+	Status() acmecert.Status
+}
+
 // RemoveAllConfirmation must be sent to remove every rule, so it can never
 // happen by accident.
 const RemoveAllConfirmation = "REMOVE ALL"
@@ -94,6 +103,8 @@ type Services struct {
 	Backups   Backups
 	Settings  Settings
 	Traffic   Traffic
+	// Certificates is set when the web UI can use a trusted certificate.
+	Certificates CertificateControl
 	// Downloads and Port are filled in by Runtime.
 	Downloads Downloads
 	Port      PortControl
@@ -130,18 +141,19 @@ func Handler(token string, services Services) http.Handler {
 		}
 		serveBackup(w, r, path, name)
 	})
-	mux.Handle("/api/", authenticate(token, api{service: services.Rules, setup: services.WireGuard, system: services.Host, backups: services.Backups, settings: services.Settings, port: services.Port, traffic: services.Traffic}))
+	mux.Handle("/api/", authenticate(token, api{service: services.Rules, setup: services.WireGuard, system: services.Host, backups: services.Backups, settings: services.Settings, port: services.Port, traffic: services.Traffic, certificates: services.Certificates}))
 	return securityHeaders(mux)
 }
 
 type api struct {
-	service  service
-	setup    WireGuardSetup
-	system   SystemControl
-	backups  Backups
-	settings Settings
-	port     PortControl
-	traffic  Traffic
+	service      service
+	setup        WireGuardSetup
+	system       SystemControl
+	backups      Backups
+	settings     Settings
+	port         PortControl
+	traffic      Traffic
+	certificates CertificateControl
 }
 
 func (a api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -224,6 +236,8 @@ func (a api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.portAction(w, r)
 	case r.URL.Path == "/api/backups" || strings.HasPrefix(r.URL.Path, "/api/backups/"):
 		a.backupAction(w, r)
+	case r.URL.Path == "/api/settings/trusted-cert":
+		a.trustedCertAction(w, r)
 	case r.URL.Path == "/api/settings/backup-dir":
 		a.backupFolderAction(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/traffic":
@@ -366,6 +380,9 @@ func (a api) settingsAction(w http.ResponseWriter, r *http.Request) {
 	if a.backups != nil {
 		response["backupDir"] = a.backups.Folder()
 	}
+	if a.certificates != nil {
+		response["trustedCert"] = a.certificates.Status()
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -396,6 +413,29 @@ func (a api) trafficAction(w http.ResponseWriter, r *http.Request) {
 		adapters = []traffic.Adapter{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"adapters": adapters, "rules": perRule})
+}
+
+func (a api) trustedCertAction(w http.ResponseWriter, r *http.Request) {
+	if a.certificates == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("a trusted certificate needs the web UI on HTTPS with its own certificate"))
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.NotFound(w, r)
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil || body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, errors.New("enabled is required"))
+		return
+	}
+	if err := a.certificates.SetEnabled(*body.Enabled); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.certificates.Status())
 }
 
 func (a api) backupFolderAction(w http.ResponseWriter, r *http.Request) {
