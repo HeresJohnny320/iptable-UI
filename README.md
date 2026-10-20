@@ -194,10 +194,18 @@ The web UI runs on port 8787. You can change that under Settings or with `P` in 
 follows you to the new port. Remember to allow the new port in your firewall and in your VPS
 provider's panel.
 
-**Please don't leave it wide open.** It's plain HTTP. Either bind it to localhost with
+The web UI uses HTTPS. On first start iptable-ui makes a self-signed certificate (saved next to
+the database as `web-tls.crt` / `web-tls.key`), so your browser warns about it the first time;
+accept it and carry on. The first time you start it, iptable-ui asks for an email to put in the
+certificate; press Enter to use `admin@admin.com`. Your answer is saved in the database, so it
+only asks once. To change it later, start with `--tls-email you@example.com`. Have a real certificate? Use
+`--tls-cert fullchain.pem --tls-key privkey.pem`. Want plain HTTP, say behind your own reverse
+proxy? Start with `--http`.
+
+**Please don't leave it wide open.** Either bind it to localhost with
 `--web-address 127.0.0.1:8787` and reach it over an SSH tunnel
-(`ssh -L 8787:127.0.0.1:8787 you@your-vps`), or put it behind a reverse proxy with HTTPS, or at the
-very least only allow your own IP to reach that port.
+(`ssh -L 8787:127.0.0.1:8787 you@your-vps`), or at the very least only allow your own IP to reach
+that port.
 
 ## Making sure it survives a reboot
 
@@ -321,6 +329,9 @@ Changed your mind? A copy of the full firewall is saved before every change in
 | `--wg-if tailscale0` | Set the VPN adapter instead of detecting it |
 | `--web-address 127.0.0.1:8787` | Where the web UI listens (overrides the saved port) |
 | `--no-web` | Don't start the web UI |
+| `--http` | Serve the web UI over plain HTTP instead of HTTPS |
+| `--tls-email you@example.com` | Change the email in the self-signed certificate (asked on first run, default `admin@admin.com`) |
+| `--tls-cert FILE --tls-key FILE` | Use your own HTTPS certificate |
 | `--whiptail` | Start in whiptail mode |
 | `--no-wizard` | Don't offer the setup wizard |
 | `--db /path/rules.db` | Use another database (default `/var/lib/iptable-ui/rules.db`) |

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/mail"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -48,7 +50,14 @@ type options struct {
 	// webAddressSet is true when --web-address was given, which overrides
 	// the port saved in the database.
 	webAddressSet bool
-	whiptail      bool
+	// webHTTP serves the web UI over plain HTTP instead of HTTPS.
+	webHTTP bool
+	// tlsEmail goes in the self-signed certificate; tlsCert and tlsKey
+	// are the user's own certificate instead.
+	tlsEmail string
+	tlsCert  string
+	tlsKey   string
+	whiptail bool
 }
 
 func main() {
@@ -355,6 +364,11 @@ func run(args []string) error {
 	webRuntime.OnPortChange(func(port int) error {
 		return database.SetSetting(context.Background(), webPortSetting, strconv.Itoa(port))
 	})
+	if !config.webHTTP {
+		if err := useTLS(webRuntime, database, config); err != nil {
+			return err
+		}
+	}
 	if config.webEnabled {
 		if _, err := webRuntime.Toggle(); err != nil {
 			return err
@@ -367,7 +381,10 @@ func run(args []string) error {
 	if webRuntime.Enabled() {
 		fmt.Println("Open it signed in:", terminalLink(webRuntime.SignInURL(), web.MaskURL(webRuntime.URL())), " (in the TUI: C copies the link, V shows it)")
 	}
-	if isPublicWebBind(config.webAddress) {
+	if webRuntime.HTTPS() && config.tlsCert == "" {
+		fmt.Println("The web UI uses a self-signed certificate: your browser will warn about it the first time. Use --tls-cert/--tls-key for your own, or --http for plain HTTP.")
+	}
+	if config.webHTTP && isPublicWebBind(config.webAddress) {
 		fmt.Fprintln(os.Stderr, "WARNING: this exposes the admin UI over plain HTTP. Restrict the port with a firewall and use a TLS reverse proxy for untrusted networks.")
 	}
 	defer webRuntime.Close()
@@ -439,6 +456,10 @@ func parseOptions(command string, args []string) (options, error) {
 	flags.BoolVar(&config.noWizard, "no-wizard", false, "do not offer the setup wizard when no VPN is found")
 	flags.BoolVar(&config.whiptail, "whiptail", false, "start in whiptail menu mode instead of the full TUI (press U in the TUI to switch)")
 	flags.StringVar(&config.webAddress, "web-address", config.webAddress, "web UI bind IP and port (default 0.0.0.0:8787; use 127.0.0.1:8787 for loopback only)")
+	flags.BoolVar(&config.webHTTP, "http", false, "serve the web UI over plain HTTP instead of HTTPS")
+	flags.StringVar(&config.tlsEmail, "tls-email", "", "email put in the self-signed HTTPS certificate (saved; default "+web.DefaultCertEmail+")")
+	flags.StringVar(&config.tlsCert, "tls-cert", "", "your own HTTPS certificate (PEM) instead of the self-signed one; needs --tls-key")
+	flags.StringVar(&config.tlsKey, "tls-key", "", "private key (PEM) for --tls-cert")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -450,6 +471,12 @@ func parseOptions(command string, args []string) (options, error) {
 		return options{}, errors.New("--web and --no-web cannot be used together")
 	}
 	config.webEnabled = !*webOff
+	if (config.tlsCert == "") != (config.tlsKey == "") {
+		return options{}, errors.New("--tls-cert and --tls-key must be used together")
+	}
+	if config.webHTTP && (config.tlsCert != "" || config.tlsEmail != "") {
+		return options{}, errors.New("--http cannot be used with --tls-cert, --tls-key or --tls-email")
+	}
 	if config.publicIF == "" {
 		if detected, err := (system.Host{Runner: firewall.ExecRunner{}}).DetectPublicInterface(context.Background()); err == nil {
 			config.publicIF, config.publicReason = detected.Name, detected.Reason
@@ -496,7 +523,70 @@ func detectVPNInterface(config *options, database *store.Store) error {
 	return nil
 }
 
-const webPortSetting = "web.port"
+const (
+	webPortSetting     = "web.port"
+	webTLSEmailSetting = "web.tls_email"
+)
+
+// useTLS turns on HTTPS for the web UI, with the user's certificate or a
+// self-signed one kept next to the database. The certificate's email comes
+// from --tls-email, the database, or (on first run) a question; whichever
+// is used is saved, so later runs keep the same certificate.
+func useTLS(webRuntime *web.Runtime, database *store.Store, config options) error {
+	if config.tlsCert != "" {
+		cert, err := web.LoadCert(config.tlsCert, config.tlsKey)
+		if err != nil {
+			return err
+		}
+		webRuntime.UseTLS(cert)
+		return nil
+	}
+	email := strings.TrimSpace(config.tlsEmail)
+	if email != "" {
+		if !validEmail(email) {
+			return fmt.Errorf("--tls-email %q is not a valid email address", email)
+		}
+	} else {
+		saved, err := database.Setting(context.Background(), webTLSEmailSetting)
+		if err != nil {
+			return err
+		}
+		email = saved
+	}
+	if email == "" {
+		email = web.DefaultCertEmail
+		if term.IsTerminal(os.Stdin.Fd()) {
+			email = askCertEmail(os.Stdin, os.Stdout)
+		}
+	}
+	if err := database.SetSetting(context.Background(), webTLSEmailSetting, email); err != nil {
+		return err
+	}
+	cert, err := web.SelfSignedCert(filepath.Dir(config.database), email, certHosts(config))
+	if err != nil {
+		return err
+	}
+	webRuntime.UseTLS(cert)
+	return nil
+}
+
+// certHosts are the addresses a self-signed certificate covers: loopback,
+// the machine's name, the public IP and the bind IP.
+func certHosts(config options) []string {
+	hosts := []string{"localhost", "127.0.0.1", "::1"}
+	if name, err := os.Hostname(); err == nil && name != "" {
+		hosts = append(hosts, name)
+	}
+	if ip := interfaceIPv4(config.publicIF); ip != "" {
+		hosts = append(hosts, ip)
+	}
+	if host, _, err := net.SplitHostPort(config.webAddress); err == nil {
+		if address, err := netip.ParseAddr(host); err == nil && !address.IsUnspecified() && !address.IsLoopback() {
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts
+}
 
 // terminalLink shows text that opens target when clicked, in terminals that
 // support links (OSC 8); others, and non-terminals, just show the text.
@@ -584,6 +674,33 @@ func interfaceIPv4(name string) string {
 		}
 	}
 	return ""
+}
+
+// askCertEmail asks for the email to put in the web UI's HTTPS certificate,
+// until it gets a valid one; a blank answer uses the default.
+func askCertEmail(in io.Reader, out io.Writer) string {
+	reader := bufio.NewReader(in)
+	for {
+		fmt.Fprintf(out, "Email for the web UI's HTTPS certificate [%s]: ", web.DefaultCertEmail)
+		answer, err := reader.ReadString('\n')
+		answer = strings.TrimSpace(answer)
+		if answer == "" {
+			return web.DefaultCertEmail
+		}
+		if validEmail(answer) {
+			return answer
+		}
+		if err != nil {
+			return web.DefaultCertEmail
+		}
+		fmt.Fprintln(out, "That doesn't look like an email address; try again or press Enter for the default.")
+	}
+}
+
+// validEmail accepts a bare address such as you@example.com.
+func validEmail(email string) bool {
+	address, err := mail.ParseAddress(email)
+	return err == nil && address.Address == email && address.Name == ""
 }
 
 func confirmPrompt(question string) bool {

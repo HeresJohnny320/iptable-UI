@@ -12,6 +12,7 @@ import (
 	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"github.com/HeresJohnny320/iptable-ui/internal/firewall"
 	"github.com/HeresJohnny320/iptable-ui/internal/store"
+	"github.com/HeresJohnny320/iptable-ui/internal/web"
 )
 
 func TestNewTokenRotatesWithStrongRandomValue(t *testing.T) {
@@ -203,5 +204,50 @@ func TestTakeoverNotice(t *testing.T) {
 	takeoverNotice(&empty, true, nil, "ens3", "/var/lib/iptable-ui/backups")
 	if !strings.Contains(empty.String(), "nothing will be imported") {
 		t.Fatalf("with nothing found the notice should say so:\n%s", empty.String())
+	}
+}
+
+func TestAskCertEmail(t *testing.T) {
+	cases := map[string]string{
+		"\n":                         web.DefaultCertEmail,
+		"":                           web.DefaultCertEmail,
+		"me@example.com\n":           "me@example.com",
+		"nope\n  me@example.com \n":  "me@example.com",
+		"nope\n\n":                   web.DefaultCertEmail,
+		"Me <me@example.com>\nx@y\n": "x@y",
+	}
+	for input, want := range cases {
+		var out strings.Builder
+		if got := askCertEmail(strings.NewReader(input), &out); got != want {
+			t.Errorf("askCertEmail(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestUseTLSSavesEmail(t *testing.T) {
+	dir := t.TempDir()
+	database, err := store.Open(filepath.Join(dir, "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	config := options{database: filepath.Join(dir, "rules.db"), webAddress: "127.0.0.1:0", tlsEmail: "me@example.com"}
+	runtime := web.NewRuntime("token", config.webAddress, web.Services{})
+	if err := useTLS(runtime, database, config); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.HTTPS() {
+		t.Fatal("HTTPS should be on")
+	}
+	config.tlsEmail = ""
+	if err := useTLS(runtime, database, config); err != nil {
+		t.Fatal(err)
+	}
+	if saved, _ := database.Setting(context.Background(), webTLSEmailSetting); saved != "me@example.com" {
+		t.Fatalf("saved email = %q", saved)
+	}
+	config.tlsEmail = "not an email"
+	if err := useTLS(runtime, database, config); err == nil {
+		t.Fatal("an invalid --tls-email should be refused")
 	}
 }

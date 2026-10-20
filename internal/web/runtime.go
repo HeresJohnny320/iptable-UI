@@ -3,9 +3,12 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -27,6 +30,8 @@ type Runtime struct {
 	// savePort persists a port chosen in the UI.
 	savePort func(int) error
 	links    map[string]downloadLink
+	// tlsConfig is set when the web UI serves HTTPS.
+	tlsConfig *tls.Config
 }
 
 type downloadLink struct {
@@ -54,6 +59,35 @@ func (r *Runtime) OnPortChange(save func(int) error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.savePort = save
+}
+
+// UseTLS makes the web UI serve HTTPS with the given certificate. Call it
+// before the server starts.
+func (r *Runtime) UseTLS(cert tls.Certificate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+}
+
+// HTTPS reports whether the web UI serves HTTPS.
+func (r *Runtime) HTTPS() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tlsConfig != nil
+}
+
+// serve starts a server on listener, wrapped in TLS when it is on. Call with
+// r.mu held.
+func (r *Runtime) serve(listener net.Listener) *http.Server {
+	if r.tlsConfig != nil {
+		listener = tls.NewListener(listener, r.tlsConfig)
+	}
+	// Browsers that reject the self-signed certificate cause handshake
+	// errors; logging them would draw over the TUI.
+	server := &http.Server{Handler: r.handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
+		ErrorLog: log.New(io.Discard, "", 0)}
+	go func() { _ = server.Serve(listener) }()
+	return server
 }
 
 func (r *Runtime) handler() http.Handler {
@@ -91,10 +125,8 @@ func (r *Runtime) SetPort(port int) (string, error) {
 			r.mu.Unlock()
 			return "", fmt.Errorf("cannot use port %d: %w", port, err)
 		}
-		server := &http.Server{Handler: r.handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
-		go func() { _ = server.Serve(listener) }()
 		old = r.server
-		r.server, r.listener = server, listener
+		r.server, r.listener = r.serve(listener), listener
 	}
 	r.address = newAddress
 	save, url := r.savePort, r.baseURL()
@@ -165,7 +197,11 @@ func (r *Runtime) baseURL() string {
 			host = "<this-server-ip>"
 		}
 	}
-	return "http://" + net.JoinHostPort(host, port)
+	scheme := "http://"
+	if r.tlsConfig != nil {
+		scheme = "https://"
+	}
+	return scheme + net.JoinHostPort(host, port)
 }
 
 func (r *Runtime) Toggle() (bool, error) {
@@ -185,12 +221,8 @@ func (r *Runtime) Toggle() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	server := &http.Server{Handler: r.handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	r.listener = listener
-	r.server = server
-	go func() {
-		_ = server.Serve(listener)
-	}()
+	r.server = r.serve(listener)
 	return true, nil
 }
 
@@ -237,17 +269,17 @@ func (r *Runtime) StatusText() string {
 	bindIP := net.ParseIP(bindHost)
 	publicBind := bindIP != nil && (bindIP.IsUnspecified() || !bindIP.IsLoopback())
 	r.mu.Lock()
-	url := r.baseURL()
+	url, secure := r.baseURL(), r.tlsConfig != nil
 	r.mu.Unlock()
 	if r.Enabled() {
 		status := "ON at " + url
-		if publicBind {
+		if publicBind && !secure {
 			status += " (plain HTTP)"
 		}
 		return status
 	}
 	status := "OFF; will use " + url + "; press W to start"
-	if publicBind {
+	if publicBind && !secure {
 		status += " (restrict access)"
 	}
 	return status

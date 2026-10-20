@@ -200,7 +200,7 @@
       <div class="host-item"><div><span class="host-label" id="boot-label">Apply rules on boot</span><span class="host-value" id="boot-state"></span><span class="host-help" id="boot-help">Firewall rules vanish on restart; when on, your saved rules are re-applied automatically at startup.</span></div><button class="switch" id="boot-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="boot-label" aria-describedby="boot-help"></button></div>
     </section>
     <p class="traffic-bar" id="traffic-bar" hidden></p>
-    <p class="security-note">This admin UI uses HTTP. Use loopback with an SSH tunnel or terminate TLS at a trusted reverse proxy; do not expose the app port to untrusted networks.</p>
+    <p class="security-note" id="security-note">This admin UI uses plain HTTP. Use loopback with an SSH tunnel or terminate TLS at a trusted reverse proxy; do not expose the app port to untrusted networks.</p>
     <div class="notice" id="notice" role="status"></div>
     <div class="layout">
       <section><div class="search-row"><label class="visually-hidden" for="search">Search rules</label><input id="search" type="search" placeholder="Search port, IP, name, #ID, on/off, tcp/udp, real/masked  (press /)" autocomplete="off" spellcheck="false"><span class="search-count" id="search-count" aria-live="polite"></span></div><p class="summary" id="summary"></p><div class="table-wrap"><table><thead><tr><th>State</th><th>Rule</th><th>Forward path</th><th>Protocol</th><th>Actions</th></tr></thead><tbody id="rules"></tbody></table><div class="empty" id="empty">Loading rules…</div></div></section>
@@ -321,6 +321,7 @@
         if (settings.backupDir) { document.querySelector('#backup-dir').value = settings.backupDir; document.querySelector('#backup-folder').textContent = settings.backupDir; }
       } catch (_) {}
     }
+    if (location.protocol === 'https:') document.querySelector('#security-note').textContent = 'This admin UI uses HTTPS. Still, only allow your own IP to reach this port.';
     let token = '';
     try { token = sessionStorage.getItem('iptable-ui-token') || ''; } catch (_) {}
     // After a port change the page reopens on the new port with the token in
@@ -725,7 +726,7 @@
     document.querySelector('#port-form').addEventListener('submit', async event => {
       event.preventDefault();
       const port = Number(new FormData(event.currentTarget).get('port'));
-      if (String(port) === location.port || (!location.port && port === 80)) { message(`The web UI already uses port ${port}.`); return; }
+      if (String(port) === location.port || (!location.port && port === (location.protocol === 'https:' ? 443 : 80))) { message(`The web UI already uses port ${port}.`); return; }
       try {
         const result = await api('/api/settings/port', { method: 'PUT', body: JSON.stringify({ port }) });
         message(result.warning || `Moving to port ${port}…`);
