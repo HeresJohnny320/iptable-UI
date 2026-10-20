@@ -1,8 +1,12 @@
 package web
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
+	"github.com/HeresJohnny320/iptable-ui/internal/backup"
 	"io"
 	"net/http"
 	"slices"
@@ -86,5 +90,63 @@ func TestRuntimeServesHTTPS(t *testing.T) {
 	}
 	if plain, err := http.Get("http://" + runtime.Address() + "/"); err == nil && plain.StatusCode == http.StatusOK {
 		t.Fatal("plain HTTP should not be served when HTTPS is on")
+	}
+}
+
+func TestFingerprintMatchesWhatTheBrowserSees(t *testing.T) {
+	cert, err := SelfSignedCert(t.TempDir(), "", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime("session-secret", "127.0.0.1:0", Services{})
+	if runtime.Fingerprint() != "" {
+		t.Fatal("plain HTTP has no fingerprint")
+	}
+	runtime.UseTLS(cert)
+	if _, err := runtime.Toggle(); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	// Connect without trusting anything, like a browser on its first visit,
+	// and fingerprint the certificate the server actually presents.
+	connection, err := tls.Dial("tcp", runtime.Address(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	presented := connection.ConnectionState().PeerCertificates[0].Raw
+	connection.Close()
+	sum := sha256.Sum256(presented)
+	want := strings.ToUpper(hex.EncodeToString(sum[:]))
+	got := strings.ReplaceAll(runtime.Fingerprint(), ":", "")
+	if got != want || len(runtime.Fingerprint()) != 95 {
+		t.Fatalf("fingerprint %s does not match the presented certificate %s", runtime.Fingerprint(), want)
+	}
+}
+
+func TestDownloadLinksWorkOnce(t *testing.T) {
+	services, _, manager := newBackupServices(t)
+	info, _, err := manager.Create(context.Background(), backup.Manual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime("session-secret", "127.0.0.1:0", services)
+	if _, err := runtime.Toggle(); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	link, err := runtime.DownloadLink(info.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt, want := range []int{http.StatusOK, http.StatusNotFound} {
+		response, err := http.Get(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != want {
+			t.Fatalf("attempt %d returned %d, want %d", attempt+1, response.StatusCode, want)
+		}
 	}
 }

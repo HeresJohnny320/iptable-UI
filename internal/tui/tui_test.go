@@ -22,8 +22,9 @@ import (
 )
 
 type testWebControl struct {
-	enabled bool
-	port    int
+	enabled     bool
+	port        int
+	fingerprint string
 }
 
 func (w *testWebControl) Toggle() (bool, error) {
@@ -42,8 +43,9 @@ func (w *testWebControl) SetPort(port int) (string, error) {
 	w.port = port
 	return fmt.Sprintf("http://203.0.113.5:%d", port), nil
 }
-func (w *testWebControl) URL() string       { return "http://127.0.0.1:8787/" }
-func (w *testWebControl) SignInURL() string { return w.URL() + "#token=" + w.Token() }
+func (w *testWebControl) URL() string         { return "http://127.0.0.1:8787/" }
+func (w *testWebControl) SignInURL() string   { return w.URL() + "#token=" + w.Token() }
+func (w *testWebControl) Fingerprint() string { return w.fingerprint }
 func (w *testWebControl) DownloadLink(name string) (string, error) {
 	return "http://203.0.113.5:8787/download/secret-" + name, nil
 }
@@ -957,7 +959,7 @@ func TestBackupDownloadKey(t *testing.T) {
 	}
 	web.enabled = true
 	updated, _ = current.updateBackups(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
-	if message := updated.(model).message; !strings.Contains(message, "http://203.0.113.5:8787/download/secret-rules-x.db") || !strings.Contains(message, "10 minutes") {
+	if message := updated.(model).message; !strings.Contains(message, "http://203.0.113.5:8787/download/secret-rules-x.db") || !strings.Contains(message, "works once, for 10 minutes") {
 		t.Fatalf("D should show the download link: %q", message)
 	}
 }
@@ -1274,6 +1276,26 @@ func TestSimpleViewFitsAnyTerminalSize(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestRevealShowsCertificateFingerprint(t *testing.T) {
+	web := &testWebControl{enabled: true, fingerprint: "AB:CD:EF"}
+	current := model{width: 120, webControl: web}
+	if strings.Contains(current.View(), "AB:CD:EF") {
+		t.Fatal("the fingerprint is shown only on request")
+	}
+	current.reveal = true
+	if view := current.View(); !strings.Contains(view, "CERT SHA-256 AB:CD:EF") {
+		t.Fatalf("V should show the certificate fingerprint:\n%s", view)
+	}
+	current.simple = true
+	if view := current.View(); !strings.Contains(view, "CERT SHA-256 AB:CD:EF") {
+		t.Fatalf("the simple view should show it too:\n%s", view)
+	}
+	copied, _ := press(t, model{webControl: web}, "c")
+	if !strings.Contains(copied.message, "check its fingerprint") {
+		t.Fatalf("copying the link should mention checking the certificate: %q", copied.message)
 	}
 }
 

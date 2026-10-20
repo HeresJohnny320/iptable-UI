@@ -209,8 +209,9 @@ func (fakeWeb) StatusText() string    { return "ON at http://203.0.113.5:8787 (p
 func (fakeWeb) MaskedStatusText() string {
 	return "ON at http://203.•••.•••.•••:8787 (plain HTTP)"
 }
-func (fakeWeb) Token() string     { return "3f9a00112233" }
-func (fakeWeb) SignInURL() string { return "http://203.0.113.5:8787/#token=3f9a00112233" }
+func (fakeWeb) Token() string       { return "3f9a00112233" }
+func (fakeWeb) SignInURL() string   { return "http://203.0.113.5:8787/#token=3f9a00112233" }
+func (fakeWeb) Fingerprint() string { return "AB:CD:EF" }
 
 func TestWebAddressIsMaskedButCanBeShown(t *testing.T) {
 	service, _ := newService(t)
@@ -222,7 +223,7 @@ func TestWebAddressIsMaskedButCanBeShown(t *testing.T) {
 	if strings.Contains(status, "203.0.113.5") || strings.Contains(status, "3f9a00112233") || !strings.Contains(status, "203.•••.•••.•••") || !strings.Contains(status, "3f9a••••••••") {
 		t.Fatalf("the main menu should mask the IP and token: %s", status)
 	}
-	if len(dialog.messages) != 1 || !strings.Contains(dialog.messages[0], "http://203.0.113.5:8787/#token=3f9a00112233") {
+	if len(dialog.messages) != 1 || !strings.Contains(dialog.messages[0], "http://203.0.113.5:8787/#token=3f9a00112233") || !strings.Contains(dialog.messages[0], "AB:CD:EF") {
 		t.Fatalf("the sign-in link item should show the full link: %v", dialog.messages)
 	}
 }

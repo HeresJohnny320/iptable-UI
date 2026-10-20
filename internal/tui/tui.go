@@ -100,6 +100,7 @@ type WebControl interface {
 	DownloadLink(name string) (string, error)
 	URL() string
 	SignInURL() string
+	Fingerprint() string
 }
 
 type WireGuardSetup interface {
@@ -549,6 +550,9 @@ func (m model) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		copyToClipboard(m.webControl.SignInURL())
 		m.message = "Sign-in link copied to your clipboard (in terminals that support it, like Windows Terminal or iTerm2; in PuTTY press V to show it and select it)."
+		if m.webControl.Fingerprint() != "" {
+			m.message += " If the browser warns about the certificate, press V and check its fingerprint matches before accepting."
+		}
 	case "?", "h":
 		m.activeScreen = helpScreen
 		m.scroll = 0
@@ -701,7 +705,7 @@ func (m model) updateBackups(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.message = err.Error() + ". " + copyHint
 			break
 		}
-		m.message = fmt.Sprintf("Download link (works for %d minutes, no sign-in needed): %s  %s", int(web.LinkLifetime.Minutes()), link, copyHint)
+		m.message = fmt.Sprintf("Download link (works once, for %d minutes, no sign-in needed): %s  %s", int(web.LinkLifetime.Minutes()), link, copyHint)
 	case "i":
 		m.prompt = &textPrompt{label: "Import a backup file on this server (full path)", submit: submitImport}
 		m.message = ""
@@ -973,7 +977,7 @@ func (m model) moreMenu() *menu {
 	if m.webControl != nil {
 		items = append(items,
 			menuItem{"c", "Copy web sign-in link", "to your clipboard, signs you in when opened"},
-			menuItem{"v", map[bool]string{true: "Hide", false: "Show"}[m.reveal] + " web address and token", "they are masked on screen by default"},
+			menuItem{"v", map[bool]string{true: "Hide", false: "Show"}[m.reveal] + " web address, token and certificate", "check the certificate when the browser warns"},
 			menuItem{"p", "Web UI port", "move the web UI to another port"},
 		)
 	}

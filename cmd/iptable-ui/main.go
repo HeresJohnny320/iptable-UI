@@ -381,8 +381,10 @@ func run(args []string) error {
 	if webRuntime.Enabled() {
 		fmt.Println("Open it signed in:", terminalLink(webRuntime.SignInURL(), web.MaskURL(webRuntime.URL())), " (in the TUI: C copies the link, V shows it)")
 	}
-	if webRuntime.HTTPS() && config.tlsCert == "" {
-		fmt.Println("The web UI uses a self-signed certificate: your browser will warn about it the first time. Use --tls-cert/--tls-key for your own, or --http for plain HTTP.")
+	if webRuntime.HTTPS() {
+		if err := explainCertificate(os.Stdout, database, webRuntime.Fingerprint(), config.tlsCert != ""); err != nil {
+			return err
+		}
 	}
 	if config.webHTTP && isPublicWebBind(config.webAddress) {
 		fmt.Fprintln(os.Stderr, "WARNING: this exposes the admin UI over plain HTTP. Restrict the port with a firewall and use a TLS reverse proxy for untrusted networks.")
@@ -527,6 +529,33 @@ const (
 	webPortSetting     = "web.port"
 	webTLSEmailSetting = "web.tls_email"
 )
+
+// fingerprintSetting remembers the last certificate shown, to tell the user
+// when the browser is about to see a new one.
+const fingerprintSetting = "web.tls_fingerprint"
+
+// explainCertificate prints the HTTPS certificate's fingerprint and how to
+// use it. Over SSH this is a trustworthy channel, so comparing it with the
+// browser's certificate details exposes anyone intercepting the connection.
+func explainCertificate(out io.Writer, database *store.Store, fingerprint string, ownCert bool) error {
+	fmt.Fprintln(out, "Web UI certificate (SHA-256):", fingerprint)
+	if ownCert {
+		return nil
+	}
+	saved, err := database.Setting(context.Background(), fingerprintSetting)
+	if err != nil {
+		return err
+	}
+	if saved != fingerprint {
+		fmt.Fprintln(out, "This certificate is new, so your browser will warn about it once. Before you accept it,")
+		fmt.Fprintln(out, "open the certificate details in the browser and check its SHA-256 fingerprint matches")
+		fmt.Fprintln(out, "the one above. If it does not match, someone may be intercepting the connection: stop.")
+		return database.SetSetting(context.Background(), fingerprintSetting, fingerprint)
+	}
+	fmt.Fprintln(out, "Same certificate as last time. If your browser warns about it again anyway, do not")
+	fmt.Fprintln(out, "continue: someone may be intercepting the connection.")
+	return nil
+}
 
 // useTLS turns on HTTPS for the web UI, with the user's certificate or a
 // self-signed one kept next to the database. The certificate's email comes

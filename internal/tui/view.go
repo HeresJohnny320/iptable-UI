@@ -616,6 +616,7 @@ var helpTopics = []struct{ section, key, title, text string }{
 	{"OTHER", "G", "WireGuard setup", "Creates a WireGuard tunnel config for this VPS and a template for the home side."},
 	{"OTHER", "W", "Web UI", "Starts or stops the browser interface. Sign in with the TOKEN shown at the top."},
 	{"OTHER", "N", "Simple or detailed view", "Simple shows plain sentences and fewer details; detailed shows interface names, codes and columns. Saved for next time."},
+	{"OTHER", "V", "Show web address, token and certificate", "Shows what is masked on screen, plus the web UI's HTTPS certificate fingerprint. The first time your browser warns about the certificate, open its certificate details and check the SHA-256 fingerprint matches. If it does not, someone may be intercepting the connection."},
 	{"OTHER", "O", "TUI look", "Switches between Classic, Readable (bright, high contrast), Light terminal (for white backgrounds), Ocean and Plain (no colors, for monochrome terminals and screen readers). Saved for next time."},
 	{"OTHER", "U", "Whiptail look", "Switches to classic blue whiptail menus (like raspi-config). Needs the whiptail package: apt install whiptail (Fedora: dnf install newt). Choose \"Switch to the full TUI\" there to come back."},
 	{"OTHER", "Q", "Quit", "Your rules keep working after you quit."},
@@ -864,7 +865,12 @@ func (m model) tokenLine() string {
 		token = m.webControl.Token()
 		hint = "  C copy sign-in link  V hide"
 	}
-	return labelStyle.Render("TOKEN ") + publicStyle.Render(token) + mutedStyle.Render(hint)
+	tokenLine := labelStyle.Render("TOKEN ") + publicStyle.Render(token) + mutedStyle.Render(hint)
+	if fingerprint := m.webControl.Fingerprint(); m.reveal && fingerprint != "" {
+		// Compare with the browser's certificate details before accepting it.
+		tokenLine += "\n" + labelStyle.Render("CERT SHA-256 ") + addressStyle.Render(fingerprint)
+	}
+	return tokenLine
 }
 
 // hyperlink makes text a clickable link (OSC 8) in terminals that support

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -117,4 +119,20 @@ func newSelfSigned(email string, hosts []string) (certPEM, keyPEM []byte, err er
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+// CertFingerprint is the certificate's SHA-256 fingerprint in the format
+// browsers show in their certificate details ("AB:CD:..."). Comparing it
+// there with the one iptable-ui prints over SSH proves the browser is talking
+// to this server and not to someone in between.
+func CertFingerprint(cert tls.Certificate) string {
+	if len(cert.Certificate) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(cert.Certificate[0])
+	parts := make([]string, len(sum))
+	for index, value := range sum {
+		parts[index] = fmt.Sprintf("%02X", value)
+	}
+	return strings.Join(parts, ":")
 }

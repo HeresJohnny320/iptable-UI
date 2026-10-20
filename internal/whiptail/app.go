@@ -20,6 +20,7 @@ type WebControl interface {
 	MaskedStatusText() string
 	Token() string
 	SignInURL() string
+	Fingerprint() string
 }
 
 type SystemControl interface {
@@ -106,7 +107,13 @@ func Run(dialog Dialog, service app.Service, web WebControl, host SystemControl)
 			enabled, toggleErr := web.Toggle()
 			m.report("Web UI "+map[bool]string{true: "started: " + web.MaskedStatusText(), false: "stopped"}[enabled], toggleErr)
 		case "link":
-			err = dialog.Message("Web UI sign-in link", "Open this link to use the web UI already signed in (select it to copy):\n\n"+web.SignInURL()+"\n\nToken: "+web.Token()+"\n\nAnyone with this link can manage your forwards until iptable-ui restarts, so keep it private.")
+			text := "Open this link to use the web UI already signed in (select it to copy):\n\n" + web.SignInURL() + "\n\nToken: " + web.Token()
+			if fingerprint := web.Fingerprint(); fingerprint != "" {
+				text += "\n\nCertificate SHA-256 fingerprint:\n" + fingerprint +
+					"\n\nIf your browser warns about the certificate, open its details and check this fingerprint matches before accepting. If it does not, someone may be intercepting the connection."
+			}
+			text += "\n\nAnyone with this link can manage your forwards until iptable-ui restarts, so keep it private."
+			err = dialog.Message("Web UI sign-in link", text)
 		case "restore":
 			m.report("Saved rules re-applied to the firewall", service.Reconcile(context.Background()))
 		case "help":

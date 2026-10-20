@@ -30,8 +30,10 @@ type Runtime struct {
 	// savePort persists a port chosen in the UI.
 	savePort func(int) error
 	links    map[string]downloadLink
-	// tlsConfig is set when the web UI serves HTTPS.
-	tlsConfig *tls.Config
+	// tlsConfig is set when the web UI serves HTTPS; fingerprint identifies
+	// its certificate.
+	tlsConfig   *tls.Config
+	fingerprint string
 }
 
 type downloadLink struct {
@@ -67,6 +69,15 @@ func (r *Runtime) UseTLS(cert tls.Certificate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	r.fingerprint = CertFingerprint(cert)
+}
+
+// Fingerprint is the SHA-256 fingerprint of the HTTPS certificate, or ""
+// when the web UI serves plain HTTP.
+func (r *Runtime) Fingerprint() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fingerprint
 }
 
 // HTTPS reports whether the web UI serves HTTPS.
@@ -148,7 +159,7 @@ func (r *Runtime) SetPort(port int) (string, error) {
 }
 
 // DownloadLink returns a link that downloads a backup without signing in.
-// It expires after LinkLifetime and needs the web UI to be running.
+// It works once, expires after LinkLifetime, and needs the web UI running.
 func (r *Runtime) DownloadLink(name string) (string, error) {
 	if r.services.Backups == nil {
 		return "", errors.New("backups are unavailable")
@@ -185,6 +196,9 @@ func (r *Runtime) Resolve(token string) (path, name string, ok bool) {
 	if !found || time.Now().After(link.expires) {
 		return "", "", false
 	}
+	// A link works once, so one that leaks (shell history, a shared screen)
+	// cannot be used to download the backup again.
+	delete(r.links, token)
 	return link.path, link.name, true
 }
 

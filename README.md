@@ -195,14 +195,46 @@ follows you to the new port. Remember to allow the new port in your firewall and
 provider's panel.
 
 The web UI uses HTTPS. On first start iptable-ui makes a self-signed certificate (saved next to
-the database as `web-tls.crt` / `web-tls.key`), so your browser warns about it the first time;
-accept it and carry on. The first time you start it, iptable-ui asks for an email to put in the
+the database as `web-tls.crt` / `web-tls.key`), so your browser warns about it the first time.
+Don't just click through that warning. See "Checking the certificate" below. The first time you
+start it, iptable-ui asks for an email to put in the
 certificate; press Enter to use `admin@admin.com`. Your answer is saved in the database, so it
 only asks once. To change it later, start with `--tls-email you@example.com`. Have a real certificate? Use
 `--tls-cert fullchain.pem --tls-key privkey.pem`. Want plain HTTP, say behind your own reverse
 proxy? Start with `--http`.
 
-**Please don't leave it wide open.** Either bind it to localhost with
+### Checking the certificate
+
+A browser warning on your first visit is expected, because nobody signed the certificate except
+your own server. The catch is that someone intercepting your connection would cause the exact
+same warning with their own certificate. So before you accept it, check that it really is yours.
+
+iptable-ui prints the certificate's fingerprint when it starts, and `V` shows it in the TUI. That
+comes over SSH, which an attacker can't tamper with:
+
+```
+Web UI certificate (SHA-256): 3A:91:7C:...:E4
+```
+
+Then compare it with what the browser received:
+
+- Firefox: on the warning page, click Advanced, then View Certificate. Look for SHA-256 under
+  Fingerprints.
+- Chrome and Edge: click "Not secure" at the left of the address bar, then "Certificate is not
+  valid". Look for SHA-256 Fingerprint. Chrome shows it with spaces instead of colons, which is
+  fine.
+
+If they match, accept and carry on. Your browser remembers it, so you won't be asked again. If
+they don't match, close the page: something between you and the server swapped the certificate.
+
+iptable-ui also tells you at startup when the certificate is new, for example after your
+server's IP changed. That's the only time a warning should come back. **If your browser warns
+again and iptable-ui didn't say the certificate is new, don't continue.**
+
+Have a domain name pointing at the VPS? Then a real certificate (for example from Let's Encrypt)
+via `--tls-cert` and `--tls-key` avoids the warning altogether.
+
+**Please don't leave it wide open anyway.** Either bind it to localhost with
 `--web-address 127.0.0.1:8787` and reach it over an SSH tunnel
 (`ssh -L 8787:127.0.0.1:8787 you@your-vps`), or at the very least only allow your own IP to reach
 that port.
@@ -241,7 +273,7 @@ In the TUI (`S`):
 
 - `N` makes a backup,
 - `Enter` restores one,
-- `D` gives you a download link that works for 10 minutes,
+- `D` gives you a download link that works once, within 10 minutes,
 - `I` imports a backup file that's already on the server.
 
 A restore replaces all your rules and settings and applies them straight away. The newest 100

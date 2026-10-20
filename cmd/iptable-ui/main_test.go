@@ -251,3 +251,30 @@ func TestUseTLSSavesEmail(t *testing.T) {
 		t.Fatal("an invalid --tls-email should be refused")
 	}
 }
+
+func TestExplainCertificateSaysWhenItIsNew(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var first, again, changed, own strings.Builder
+	if err := explainCertificate(&first, database, "AA:BB", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.String(), "AA:BB") || !strings.Contains(first.String(), "This certificate is new") {
+		t.Fatalf("first start should explain the new certificate:\n%s", first.String())
+	}
+	_ = explainCertificate(&again, database, "AA:BB", false)
+	if !strings.Contains(again.String(), "Same certificate as last time") || !strings.Contains(again.String(), "do not") {
+		t.Fatalf("a known certificate should say an unexpected warning means trouble:\n%s", again.String())
+	}
+	_ = explainCertificate(&changed, database, "CC:DD", false)
+	if !strings.Contains(changed.String(), "This certificate is new") {
+		t.Fatalf("a replaced certificate should be announced:\n%s", changed.String())
+	}
+	_ = explainCertificate(&own, database, "EE:FF", true)
+	if !strings.Contains(own.String(), "EE:FF") || strings.Contains(own.String(), "warn") {
+		t.Fatalf("your own trusted certificate needs no warning:\n%s", own.String())
+	}
+}
